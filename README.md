@@ -108,6 +108,16 @@ Simply ask Claude to use the specific tool:
 "Use the code-query MCP to get details for src/auth/login.ts from my_project"
 ```
 
+#### Dataset Discovery
+If you don't know what datasets are available or forget the dataset name:
+
+```
+"Use the code-query MCP to list all datasets"
+"Use the code-query MCP to search for 'authentication'" (Claude will automatically list datasets first)
+```
+
+The MCP will guide Claude to use the `list_datasets` tool whenever a dataset name is needed but unknown.
+
 #### Method 2: Explicit Tool Names
 If Claude doesn't automatically recognize the request, you can be more explicit:
 
@@ -169,16 +179,19 @@ Search for files containing specific keywords:
 
 #### 3. Get File Details
 
-Get complete details for a specific file:
+Get complete details for a specific file. Now supports partial path matching!
 
 **Ask Claude:**
 ```
+"Use code-query MCP to get details for login.ts from claude-acorn-gui"
+"Use code-query MCP to get details for auth/login from claude-acorn-gui"
 "Use code-query MCP to get details for src/auth/login.ts from claude-acorn-gui"
 ```
 
-**Tool call:** `get_file(filepath, dataset_name)`
-- `filepath`: Full path to the file
+**Tool call:** `get_file(filepath, dataset_name, limit?)`
+- `filepath`: Full or partial path to the file (use % for wildcards)
 - `dataset_name`: Which dataset contains the file
+- `limit`: Optional max results for partial matches (default: 10)
 
 **Response:**
 ```json
@@ -195,6 +208,8 @@ Get complete details for a specific file:
   "other_notes": [...]
 }
 ```
+
+If multiple files match, returns an array of results.
 
 #### 4. List Domains
 
@@ -240,17 +255,46 @@ Remove a dataset when no longer needed:
 
 **Tool call:** `clear_dataset(dataset_name)`
 
+#### 8. Document Directory (NEW!)
+
+Generate orchestration instructions for documenting a codebase:
+
+**Ask Claude:**
+```
+"Use code-query MCP to document the src directory as 'my-project'"
+"Use code-query MCP to document the src directory as 'my-project', excluding test files and node_modules"
+```
+
+**Tool call:** `document_directory(dataset_name, directory, exclude_patterns?, batch_size?)`
+- `dataset_name`: Name for the dataset
+- `directory`: Directory to document
+- `exclude_patterns`: Optional patterns to exclude (e.g., ["*.test.js", "temp/*"])
+- `batch_size`: Files per agent batch (default: 20)
+
+**Response:** Returns orchestration instructions for Claude to create subagents that will analyze the code and use the `insert_file_documentation` tool to store results.
+
+**Workflow:**
+1. Claude calls `document_directory` to get instructions
+2. Claude creates multiple subagents based on the batches
+3. Each agent analyzes their assigned files
+4. Agents use `insert_file_documentation` to store results
+5. Progress is tracked until completion
+
 ## MCP Tools Reference
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
 | `import_data` | Import JSON files from directory | `dataset_name`, `directory`, `replace?` |
 | `search_files` | Search within dataset | `query`, `dataset_name`, `limit?` |
-| `get_file` | Get full file details | `filepath`, `dataset_name` |
+| `get_file` | Get full file details (supports partial matching) | `filepath`, `dataset_name`, `limit?` |
 | `list_domains` | List DDD contexts | `dataset_name` |
 | `list_datasets` | Show all loaded datasets | - |
 | `get_status` | Database status and statistics | - |
 | `clear_dataset` | Remove a dataset | `dataset_name` |
+| `document_directory` | Generate instructions for code documentation | `dataset_name`, `directory`, `exclude_patterns?`, `batch_size?` |
+| `insert_file_documentation` | Insert analyzed file data (used by agents) | `dataset_name`, `filepath`, `filename`, `overview`, etc. |
+
+**Note**: When a tool requires a `dataset_name` but you don't know it, the tool descriptions will guide Claude to use `list_datasets` first to discover available datasets.
 
 ## Data Format
 
@@ -370,6 +414,7 @@ If the MCP tools aren't available in Claude:
 
 ## Example Workflow
 
+### Option 1: Import Existing JSON Files
 1. **Initial Setup** (one time):
    ```
    cd /path/to/your/project
@@ -379,20 +424,35 @@ If the MCP tools aren't available in Claude:
 2. **Daily Usage**:
    ```
    > search_files("authentication", "my_project")
-   > get_file("src/auth/login.ts", "my_project")
+   > get_file("login.ts", "my_project")  # Partial path matching!
    ```
 
-3. **Cross-Project**:
+### Option 2: Document Directory Directly (NEW!)
+1. **Document your codebase**:
    ```
-   cd /path/to/another/project
-   > import_data("another_project", "data/reviews")
-   > search_files("api", "another_project")
+   cd /path/to/your/project
+   > document_directory("my_project", "src", ["*.test.js", "node_modules"])
+   ```
+   Claude will orchestrate agents to analyze and document all code files.
+
+2. **Query your documented code**:
+   ```
+   > search_files("authentication", "my_project")
+   > get_file("login", "my_project")  # Find any login file
+   > list_domains("my_project")       # See DDD structure
    ```
 
-4. **Cleanup**:
-   ```
-   > clear_dataset("old_project")
-   ```
+### Cross-Project Usage
+```
+cd /path/to/another/project
+> document_directory("another_project", ".", ["dist/*", "build/*"])
+> search_files("api", "another_project")
+```
+
+### Cleanup
+```
+> clear_dataset("old_project")
+```
 
 ## License
 
