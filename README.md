@@ -293,6 +293,9 @@ Generate orchestration instructions for documenting a codebase:
 | `clear_dataset` | Remove a dataset | `dataset_name` |
 | `document_directory` | Generate instructions for code documentation | `dataset_name`, `directory`, `exclude_patterns?`, `batch_size?` |
 | `insert_file_documentation` | Insert analyzed file data (used by agents) | `dataset_name`, `filepath`, `filename`, `overview`, etc. |
+| `update_file_documentation` | Update existing file documentation | `dataset_name`, `filepath`, plus any fields to update |
+| `get_project_config` | Get project configuration | - |
+| `install_pre_commit_hook` | Install git pre-commit hook | `dataset_name`, `mode?` |
 
 **Note**: When a tool requires a `dataset_name` but you don't know it, the tool descriptions will guide Claude to use `list_datasets` first to discover available datasets.
 
@@ -453,6 +456,73 @@ cd /path/to/another/project
 ```
 > clear_dataset("old_project")
 ```
+
+## Git Pre-commit Hook Integration
+
+The MCP includes a git pre-commit hook system that automatically queues changed files for documentation updates.
+
+### Installation
+
+**Ask Claude:**
+```
+"Use code-query MCP to install pre-commit hook for dataset 'my-project'"
+```
+
+This will:
+1. Create `.code-query/config.json` with your project settings
+2. Install a lightweight pre-commit hook to `.git/hooks/pre-commit`
+3. Create `.code-query/git-doc-update` script for processing queued files
+4. Set up `.code-query/.gitignore` to exclude the queue file
+
+### How It Works
+
+1. **Commit Changes**: When you commit, the hook automatically queues changed files
+   ```bash
+   git add src/new-feature.js
+   git commit -m "Add new feature"
+   # Output: 📄 Code Query: 1 file(s) queued for documentation update.
+   ```
+
+2. **Update Documentation**: Run the update script when convenient
+   ```bash
+   .code-query/git-doc-update
+   # Shows queued files, estimates time, asks for confirmation
+   # Calls Claude to analyze and update documentation
+   ```
+
+3. **Queue Management**: 
+   - Files are queued in `.code-query/update_queue.txt`
+   - Duplicates are automatically prevented
+   - Queue persists until processed
+   - Successfully processed files are removed from queue
+
+### Configuration
+
+The `.code-query/config.json` file stores:
+```json
+{
+  "datasetName": "my-project",
+  "mode": "queue",
+  "excludePatterns": ["*.test.js", "*.spec.ts", "node_modules/*", ".git/*"],
+  "createdAt": "2024-01-01T00:00:00.000Z"
+}
+```
+
+### Tips
+
+- Create an alias for easier access:
+  ```bash
+  alias git-doc-update='.code-query/git-doc-update'
+  ```
+
+- Check project configuration:
+  ```
+  "Use code-query MCP to get project config"
+  ```
+
+- The hook is non-blocking - commits always succeed
+- Documentation updates require internet access (for Claude API)
+- Each file takes 5-30 seconds to analyze
 
 ## License
 

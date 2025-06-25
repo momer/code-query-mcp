@@ -656,6 +656,336 @@ Focus on being concise but comprehensive. Identify the core purpose and key elem
                 return part
         
         return ""
+    
+    def update_file_documentation(self, dataset_name: str, filepath: str, filename: str = None,
+                                overview: str = None, functions: Dict[str, Any] = None,
+                                exports: Dict[str, str] = None, imports: Dict[str, List[str]] = None,
+                                types_interfaces_classes: Dict[str, str] = None,
+                                constants: Dict[str, str] = None, ddd_context: str = None,
+                                dependencies: List[str] = None, other_notes: List[str] = None) -> Dict[str, Any]:
+        """Update existing file documentation in dataset."""
+        try:
+            # Check if file exists in dataset
+            existing = self.db.execute(
+                "SELECT * FROM files WHERE dataset_id = ? AND filepath = ?",
+                (dataset_name, filepath)
+            ).fetchone()
+            
+            if not existing:
+                return {
+                    "success": False,
+                    "message": f"File '{filepath}' not found in dataset '{dataset_name}'. Use insert_file_documentation for new files."
+                }
+            
+            # Build update query dynamically based on provided fields
+            update_fields = []
+            update_values = []
+            
+            if filename is not None:
+                update_fields.append("filename = ?")
+                update_values.append(filename)
+            if overview is not None:
+                update_fields.append("overview = ?")
+                update_values.append(overview)
+            if ddd_context is not None:
+                update_fields.append("ddd_context = ?")
+                update_values.append(ddd_context)
+            if functions is not None:
+                update_fields.append("functions = ?")
+                update_values.append(json.dumps(functions))
+            if exports is not None:
+                update_fields.append("exports = ?")
+                update_values.append(json.dumps(exports))
+            if imports is not None:
+                update_fields.append("imports = ?")
+                update_values.append(json.dumps(imports))
+            if types_interfaces_classes is not None:
+                update_fields.append("types_interfaces_classes = ?")
+                update_values.append(json.dumps(types_interfaces_classes))
+            if constants is not None:
+                update_fields.append("constants = ?")
+                update_values.append(json.dumps(constants))
+            if dependencies is not None:
+                update_fields.append("dependencies = ?")
+                update_values.append(json.dumps(dependencies))
+            if other_notes is not None:
+                update_fields.append("other_notes = ?")
+                update_values.append(json.dumps(other_notes))
+            
+            if not update_fields:
+                return {
+                    "success": False,
+                    "message": "No fields provided to update"
+                }
+            
+            # Add WHERE clause values
+            update_values.extend([dataset_name, filepath])
+            
+            # Execute update
+            update_query = f"""
+                UPDATE files 
+                SET {', '.join(update_fields)}
+                WHERE dataset_id = ? AND filepath = ?
+            """
+            
+            self.db.execute(update_query, update_values)
+            self.db.commit()
+            
+            return {
+                "success": True,
+                "message": f"Successfully updated documentation for {filepath}"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error updating documentation: {str(e)}"
+            }
+    
+    def get_project_config(self) -> Dict[str, Any]:
+        """Get project configuration from .code-query/config.json."""
+        config_path = os.path.join(self.cwd, ".code-query", "config.json")
+        
+        if not os.path.exists(config_path):
+            return {
+                "success": False,
+                "message": "No project configuration found. Use install_pre_commit_hook to set up."
+            }
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            return {
+                "success": True,
+                "config": config
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error reading configuration: {str(e)}"
+            }
+    
+    def install_pre_commit_hook(self, dataset_name: str, mode: str = "queue") -> Dict[str, Any]:
+        """Install pre-commit hook for automatic documentation updates."""
+        try:
+            # Check if we're in a git repository
+            git_dir = os.path.join(self.cwd, ".git")
+            if not os.path.exists(git_dir):
+                return {
+                    "success": False,
+                    "message": "Not in a git repository. Please run this from the root of your git project."
+                }
+            
+            # Create .code-query directory
+            code_query_dir = os.path.join(self.cwd, ".code-query")
+            os.makedirs(code_query_dir, exist_ok=True)
+            
+            # Create configuration file
+            config_path = os.path.join(code_query_dir, "config.json")
+            config = {
+                "datasetName": dataset_name,
+                "mode": mode,
+                "excludePatterns": ["*.test.js", "*.spec.ts", "node_modules/*", ".git/*"],
+                "createdAt": datetime.now().isoformat()
+            }
+            
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            
+            # Pre-commit hook content
+            pre_commit_hook = """#!/bin/bash
+# Code Query MCP Pre-commit Hook
+# This hook queues changed files for documentation updates
+
+CONFIG_FILE=".code-query/config.json"
+QUEUE_FILE=".code-query/update_queue.txt"
+
+# Check if configuration exists
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Warning: Code Query configuration not found. Skipping documentation queue."
+    exit 0
+fi
+
+# Get staged files (Added, Copied, Modified, Deleted)
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMD)
+
+if [ -z "$STAGED_FILES" ]; then
+    # No relevant files staged
+    exit 0
+fi
+
+# Create queue file if it doesn't exist
+touch "$QUEUE_FILE"
+
+# Append staged files to queue (avoid duplicates)
+echo "$STAGED_FILES" | while IFS= read -r file; do
+    if [ -n "$file" ] && ! grep -Fxq "$file" "$QUEUE_FILE"; then
+        echo "$file" >> "$QUEUE_FILE"
+    fi
+done
+
+# Count queued files
+QUEUE_COUNT=$(wc -l < "$QUEUE_FILE" | tr -d ' ')
+
+echo "📄 Code Query: $QUEUE_COUNT file(s) queued for documentation update."
+echo "   Run '.code-query/git-doc-update' when ready to update documentation."
+
+exit 0
+"""
+            
+            # Git doc-update script content
+            git_doc_update = """#!/bin/bash
+# Code Query Documentation Update Script
+
+CONFIG_FILE=".code-query/config.json"
+QUEUE_FILE=".code-query/update_queue.txt"
+
+# Helper functions
+error_exit() {
+    echo "Error: $1" >&2
+    exit 1
+}
+
+# Check dependencies
+if ! command -v jq &> /dev/null; then
+    error_exit "'jq' is not installed. Please install 'jq' to parse JSON configuration."
+fi
+
+if ! command -v claude &> /dev/null; then
+    error_exit "'claude' CLI not found. Please ensure Claude Code is installed."
+fi
+
+# Check configuration
+if [ ! -f "$CONFIG_FILE" ]; then
+    error_exit "Configuration file not found. Run 'claude mcp install-pre-commit-hook' first."
+fi
+
+# Get dataset name
+DATASET_NAME=$(jq -r '.datasetName' "$CONFIG_FILE")
+if [ -z "$DATASET_NAME" ] || [ "$DATASET_NAME" = "null" ]; then
+    error_exit "Dataset name not found in configuration."
+fi
+
+# Check queue file
+if [ ! -f "$QUEUE_FILE" ] || [ ! -s "$QUEUE_FILE" ]; then
+    echo "No files queued for documentation update."
+    exit 0
+fi
+
+# Read and deduplicate files
+mapfile -t UNIQUE_FILES < <(sort -u "$QUEUE_FILE")
+NUM_FILES=${#UNIQUE_FILES[@]}
+
+if [ "$NUM_FILES" -eq 0 ]; then
+    echo "No files queued after deduplication."
+    > "$QUEUE_FILE"
+    exit 0
+fi
+
+echo "Found $NUM_FILES file(s) queued for documentation update:"
+printf "  - %s\\n" "${UNIQUE_FILES[@]}"
+echo ""
+
+# Estimate time
+EST_TIME_MIN=$((NUM_FILES * 5 / 60))
+EST_TIME_MAX=$((NUM_FILES * 30 / 60))
+if [ "$EST_TIME_MIN" -eq 0 ]; then
+    echo "Estimated time: ${NUM_FILES}0-$((NUM_FILES * 30)) seconds"
+else
+    echo "Estimated time: ${EST_TIME_MIN}-${EST_TIME_MAX} minutes"
+fi
+
+read -p "Proceed with documentation update? (y/N) " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Documentation update cancelled."
+    exit 0
+fi
+
+echo ""
+echo "Starting documentation update..."
+
+# Build file list for Claude prompt
+FILE_LIST=""
+for file in "${UNIQUE_FILES[@]}"; do
+    if [ -n "$FILE_LIST" ]; then
+        FILE_LIST="$FILE_LIST, '$file'"
+    else
+        FILE_LIST="'$file'"
+    fi
+done
+
+# Call Claude CLI
+claude "Use the code-query MCP to update documentation for files $FILE_LIST in dataset '$DATASET_NAME'"
+
+if [ $? -eq 0 ]; then
+    echo ""
+    echo "✅ Documentation update completed successfully."
+    > "$QUEUE_FILE"  # Clear the queue
+else
+    echo ""
+    echo "❌ Documentation update failed. Files remain in queue."
+    exit 1
+fi
+"""
+            
+            # Write pre-commit hook
+            hook_path = os.path.join(git_dir, "hooks", "pre-commit")
+            
+            # Check if hook already exists
+            if os.path.exists(hook_path):
+                # Read existing hook to check if it's ours
+                with open(hook_path, 'r') as f:
+                    existing_content = f.read()
+                    if "Code Query MCP Pre-commit Hook" not in existing_content:
+                        return {
+                            "success": False,
+                            "message": "A pre-commit hook already exists. Please manually integrate or remove it first."
+                        }
+            
+            # Write the hook
+            with open(hook_path, 'w') as f:
+                f.write(pre_commit_hook)
+            
+            # Make hook executable
+            os.chmod(hook_path, 0o755)
+            
+            # Write git-doc-update script
+            update_script_path = os.path.join(code_query_dir, "git-doc-update")
+            with open(update_script_path, 'w') as f:
+                f.write(git_doc_update)
+            
+            # Make update script executable
+            os.chmod(update_script_path, 0o755)
+            
+            # Create .gitignore in .code-query if needed
+            gitignore_path = os.path.join(code_query_dir, ".gitignore")
+            if not os.path.exists(gitignore_path):
+                with open(gitignore_path, 'w') as f:
+                    f.write("update_queue.txt\n")
+            
+            return {
+                "success": True,
+                "message": f"Successfully installed pre-commit hook for dataset '{dataset_name}'",
+                "details": {
+                    "config_path": config_path,
+                    "hook_path": hook_path,
+                    "update_script": update_script_path,
+                    "mode": mode
+                },
+                "next_steps": [
+                    "The pre-commit hook will now queue changed files for documentation updates",
+                    "Run '.code-query/git-doc-update' to process queued files",
+                    "You can also create an alias: alias git-doc-update='.code-query/git-doc-update'"
+                ]
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error installing pre-commit hook: {str(e)}"
+            }
 
 
 # Initialize server
@@ -867,6 +1197,94 @@ async def list_tools() -> List[Tool]:
                 },
                 "required": ["dataset_name", "filepath", "filename", "overview"]
             }
+        ),
+        Tool(
+            name="update_file_documentation",
+            description="Update existing file documentation in dataset. Only updates provided fields.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset containing the file. Use list_datasets tool if unknown."
+                    },
+                    "filepath": {
+                        "type": "string",
+                        "description": "Full file path to update"
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Updated file name (optional)"
+                    },
+                    "overview": {
+                        "type": "string",
+                        "description": "Updated file overview (optional)"
+                    },
+                    "functions": {
+                        "type": "object",
+                        "description": "Updated functions (optional)"
+                    },
+                    "exports": {
+                        "type": "object",
+                        "description": "Updated exports (optional)"
+                    },
+                    "imports": {
+                        "type": "object",
+                        "description": "Updated imports (optional)"
+                    },
+                    "types_interfaces_classes": {
+                        "type": "object",
+                        "description": "Updated type definitions (optional)"
+                    },
+                    "constants": {
+                        "type": "object",
+                        "description": "Updated constants (optional)"
+                    },
+                    "ddd_context": {
+                        "type": "string",
+                        "description": "Updated DDD context (optional)"
+                    },
+                    "dependencies": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Updated dependencies (optional)"
+                    },
+                    "other_notes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Updated notes (optional)"
+                    }
+                },
+                "required": ["dataset_name", "filepath"]
+            }
+        ),
+        Tool(
+            name="get_project_config",
+            description="Get current project configuration from .code-query/config.json",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
+            name="install_pre_commit_hook",
+            description="Install pre-commit hook for automatic documentation update queuing",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset name to use for this project"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Hook mode: 'queue' (default) queues files for manual update",
+                        "enum": ["queue"],
+                        "default": "queue"
+                    }
+                },
+                "required": ["dataset_name"]
+            }
         )
     ]
 
@@ -943,6 +1361,37 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             functions, exports, imports, types_interfaces_classes,
             constants, ddd_context, dependencies, other_notes
         )
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
+    elif name == "update_file_documentation":
+        dataset_name = arguments.get("dataset_name", "")
+        filepath = arguments.get("filepath", "")
+        filename = arguments.get("filename")
+        overview = arguments.get("overview")
+        functions = arguments.get("functions")
+        exports = arguments.get("exports")
+        imports = arguments.get("imports")
+        types_interfaces_classes = arguments.get("types_interfaces_classes")
+        constants = arguments.get("constants")
+        ddd_context = arguments.get("ddd_context")
+        dependencies = arguments.get("dependencies")
+        other_notes = arguments.get("other_notes")
+        
+        result = query_server.update_file_documentation(
+            dataset_name, filepath, filename, overview,
+            functions, exports, imports, types_interfaces_classes,
+            constants, ddd_context, dependencies, other_notes
+        )
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
+    elif name == "get_project_config":
+        result = query_server.get_project_config()
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
+    elif name == "install_pre_commit_hook":
+        dataset_name = arguments.get("dataset_name", "")
+        mode = arguments.get("mode", "queue")
+        result = query_server.install_pre_commit_hook(dataset_name, mode)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
     else:
