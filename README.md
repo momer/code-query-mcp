@@ -26,22 +26,37 @@ For new projects, use the setup recommendation tool to get started quickly:
 ```
 
 This will:
-1. **Analyze your project** - Detect git repository, existing datasets, and project structure
-2. **Recommend setup steps** - Suggest the exact commands needed for your project
-3. **Guide the process** - Show what needs to be done and why
+1. **Check your current state** - Look for existing datasets, configuration files, and git hooks (without making any changes)
+2. **Analyze your project** - Detect git repository and project structure
+3. **Recommend setup steps** - Suggest the exact commands needed for your project
+4. **Guide the process** - Show what needs to be done and why
 
-Example response:
+Example response for a new project:
 ```
-To complete the Code Query MCP setup for 'my-awesome-project', I recommend running these 3 commands:
+To complete the Code Query MCP setup for 'my-awesome-project', here are the recommended steps:
 
+**Required:**
 1. Use code-query MCP to document directory 'src' as 'my-awesome-project'
 2. Use code-query MCP to create project config for 'my-awesome-project'
-3. Use code-query MCP to install pre-commit hook for 'my-awesome-project'
 
-Would you like me to run all these setup commands now?
+**Optional (Git Hooks):**
+3. Use code-query MCP to install pre-commit hook for 'my-awesome-project'
+4. Use code-query MCP to install post-merge hook for 'my-awesome-project'
+
+Would you like me to run these commands? You can choose to run all of them, just the required ones, or handle them individually.
 ```
 
-Simply say "yes" and Claude will execute all the setup steps automatically!
+Example response for a project with existing setup:
+```
+Your Code Query MCP setup for 'my-awesome-project' is mostly complete! The only missing components are optional git hooks:
+
+1. Use code-query MCP to install pre-commit hook for 'my-awesome-project'
+2. Use code-query MCP to install post-merge hook for 'my-awesome-project'
+
+These git hooks are optional but recommended for automatic documentation updates. Would you like me to install them?
+```
+
+Simply respond with your preference and Claude will execute the appropriate setup steps!
 
 ## Features
 
@@ -376,7 +391,7 @@ Generate orchestration instructions for documenting a codebase:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `recommend_setup` | Get setup recommendations for new projects | `project_name?`, `source_directory?` |
+| `recommend_setup` | Check setup status and get recommendations (read-only) | `project_name?`, `source_directory?` |
 | `import_data` | Import JSON files from directory | `dataset_name`, `directory`, `replace?` |
 | `search_files` | Search within dataset | `query`, `dataset_name`, `limit?` |
 | `get_file` | Get full file details (supports partial matching) | `filepath`, `dataset_name`, `limit?` |

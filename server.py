@@ -1228,16 +1228,16 @@ Focus on being concise but comprehensive. Identify the core purpose and key elem
                         worktree_dataset = f"{base_dataset}-wt-{worktree_name}"
                         result["worktree_info"]["worktree_dataset_name"] = worktree_dataset
                         
-            except FileNotFoundError:
-                logging.warning("git command not found. Skipping worktree checks.")
-            except subprocess.CalledProcessError as e:
-                logging.warning(f"git command failed: {e}")
-                if e.stderr:
-                    logging.warning(f"git stderr: {e.stderr}")
-            except subprocess.TimeoutExpired:
-                logging.warning("git command timed out")
-            except OSError as e:
-                logging.warning(f"OS error running git command: {e}")
+                except FileNotFoundError:
+                    logging.warning("git command not found. Skipping worktree checks.")
+                except subprocess.CalledProcessError as e:
+                    logging.warning(f"git command failed: {e}")
+                    if e.stderr:
+                        logging.warning(f"git stderr: {e.stderr}")
+                except subprocess.TimeoutExpired:
+                    logging.warning("git command timed out")
+                except OSError as e:
+                    logging.warning(f"OS error running git command: {e}")
         else:
             result["git_repository"] = False
         
@@ -1497,6 +1497,11 @@ QUEUE_FILE=".code-query/update_queue.txt"
 # Function to get worktree-specific dataset name
 get_dataset_name() {
     local base_dataset="$1"
+    if [ -z "$base_dataset" ]; then
+        # This should not happen, but as a safeguard, return a default or exit
+        echo "default-dataset"
+        return
+    fi
     
     # Check if we're in a worktree
     GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
@@ -1507,9 +1512,14 @@ get_dataset_name() {
     
     # Check if this is a worktree (not the main git dir)
     if [[ "$GIT_DIR" == *".git/worktrees/"* ]]; then
-        # Extract worktree name from path
+        # Extract worktree name from path and validate it
         WORKTREE_NAME=$(basename "$GIT_DIR")
-        echo "${base_dataset}-wt-${WORKTREE_NAME}"
+        if [ -n "$WORKTREE_NAME" ] && [ "$WORKTREE_NAME" != "." ]; then
+            echo "${base_dataset}-wt-${WORKTREE_NAME}"
+        else
+            # Fallback to base dataset name if worktree name is invalid
+            echo "$base_dataset"
+        fi
     else
         echo "$base_dataset"
     fi
@@ -1552,10 +1562,7 @@ touch "$QUEUE_FILE"
 
 # Filter and append staged files to queue
 QUEUED_COUNT=0
-echo "$STAGED_FILES" | while IFS= read -r file; do
-    if [ -z "$file" ]; then
-        continue
-    fi
+echo "$STAGED_FILES" | while IFS= read -r file && [ -n "$file" ]; do
     
     # Check if file matches any exclude pattern
     is_excluded=false
@@ -1604,6 +1611,11 @@ error_exit() {
 # Function to get worktree-specific dataset name
 get_dataset_name() {
     local base_dataset="$1"
+    if [ -z "$base_dataset" ]; then
+        # This should not happen, but as a safeguard, return a default or exit
+        echo "default-dataset"
+        return
+    fi
     
     # Check if we're in a worktree
     GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
@@ -1614,9 +1626,14 @@ get_dataset_name() {
     
     # Check if this is a worktree (not the main git dir)
     if [[ "$GIT_DIR" == *".git/worktrees/"* ]]; then
-        # Extract worktree name from path
+        # Extract worktree name from path and validate it
         WORKTREE_NAME=$(basename "$GIT_DIR")
-        echo "${base_dataset}-wt-${WORKTREE_NAME}"
+        if [ -n "$WORKTREE_NAME" ] && [ "$WORKTREE_NAME" != "." ]; then
+            echo "${base_dataset}-wt-${WORKTREE_NAME}"
+        else
+            # Fallback to base dataset name if worktree name is invalid
+            echo "$base_dataset"
+        fi
     else
         echo "$base_dataset"
     fi
@@ -1704,18 +1721,16 @@ fi
 echo ""
 echo "Starting documentation update..."
 
-# Build file list for Claude prompt
-FILE_LIST=""
-for file in "${UNIQUE_FILES[@]}"; do
-    if [ -n "$FILE_LIST" ]; then
-        FILE_LIST="$FILE_LIST, '$file'"
-    else
-        FILE_LIST="'$file'"
-    fi
-done
+# Build a JSON array of files for the Claude prompt to prevent injection
+FILE_LIST_JSON=$(printf "%s\n" "${UNIQUE_FILES[@]}" | jq -R . | jq -s .)
+
+if [ -z "$FILE_LIST_JSON" ] || [ "$FILE_LIST_JSON" = "[]" ]; then
+    echo "No valid files to update."
+    exit 0
+fi
 
 # Call Claude CLI
-claude "Use the code-query MCP to update documentation for files $FILE_LIST in dataset '$DATASET_NAME'"
+claude "Use the code-query MCP to update documentation for files in the JSON array $FILE_LIST_JSON in dataset '$DATASET_NAME'"
 
 if [ $? -eq 0 ]; then
     echo ""
@@ -1882,7 +1897,7 @@ fi
 
 # Check if we just merged from main branch
 # First, try to get the main worktree's branch
-MAIN_BRANCH=$(git worktree list --porcelain | grep -A 1 "worktree .*[^/]$" | grep "branch" | head -n1 | sed 's/branch refs\/heads\///')
+MAIN_BRANCH=$(git worktree list --porcelain | grep -A 1 "worktree .*[^/]$" | grep "branch" | head -n1 | sed 's/branch refs\\/heads\\///')
 if [ -z "$MAIN_BRANCH" ]; then
     # Fallback to common main branch names
     if git show-ref --verify --quiet refs/heads/main; then
@@ -1896,7 +1911,7 @@ fi
 
 # Check if we just merged from the main branch
 MERGED_FROM=$(git reflog -1 | grep -o "merge [^:]*" | cut -d' ' -f2)
-if [[ "$MERGED_FROM" == *"$MAIN_BRANCH"* ]]; then
+if [ -n "$MERGED_FROM" ] && [[ "$MERGED_FROM" == *"$MAIN_BRANCH"* ]]; then
     echo "📄 Code Query: Detected merge from main branch ($MAIN_BRANCH)"
     echo "   Syncing documentation from worktree dataset '$CURRENT_DATASET' to main dataset '$MAIN_DATASET'"
     
@@ -1904,21 +1919,19 @@ if [[ "$MERGED_FROM" == *"$MAIN_BRANCH"* ]]; then
     CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD)
     
     if [ -n "$CHANGED_FILES" ]; then
-        # Build file list for Claude
-        FILE_LIST=""
-        while IFS= read -r file; do
-            if [ -n "$FILE_LIST" ]; then
-                FILE_LIST="$FILE_LIST, '$file'"
-            else
-                FILE_LIST="'$file'"
-            fi
-        done <<< "$CHANGED_FILES"
-        
-        echo "   Files to sync: $FILE_LIST"
+        # Build a JSON array of files to prevent prompt injection
+        FILE_LIST_JSON=$(echo "$CHANGED_FILES" | jq -R . | jq -s .)
+
+        if [ -z "$FILE_LIST_JSON" ] || [ "$FILE_LIST_JSON" = "[]" ]; then
+            echo "   No valid files to sync."
+            exit 0
+        fi
+
+        echo "   Files to sync: $FILE_LIST_JSON"
         echo ""
         
         # Use Claude to sync the files
-        claude --print "Use code-query MCP to copy documentation for files $FILE_LIST from dataset '$CURRENT_DATASET' to dataset '$MAIN_DATASET'"
+        claude --print "Use code-query MCP to copy documentation for files in the JSON array $FILE_LIST_JSON from dataset '$CURRENT_DATASET' to dataset '$MAIN_DATASET'"
     fi
 fi
 
@@ -2086,12 +2099,36 @@ exit 0
             }
             
             if recommended_commands:
-                response["recommendation"] = (
-                    f"To complete the Code Query MCP setup for '{project_name}', "
-                    f"I recommend running these {len(recommended_commands)} commands:\n\n" +
-                    "\n".join(f"{i+1}. {cmd}" for i, cmd in enumerate(recommended_commands)) +
-                    "\n\nWould you like me to run all these setup commands now?"
-                )
+                # Separate optional git hook commands from required commands
+                required_commands = [cmd for cmd in recommended_commands if "git hook" not in cmd.lower()]
+                optional_commands = [cmd for cmd in recommended_commands if "git hook" in cmd.lower()]
+                
+                if required_commands and optional_commands:
+                    response["recommendation"] = (
+                        f"To complete the Code Query MCP setup for '{project_name}', "
+                        f"here are the recommended steps:\n\n" +
+                        "**Required:**\n" +
+                        "\n".join(f"{i+1}. {cmd}" for i, cmd in enumerate(required_commands)) +
+                        "\n\n**Optional (Git Hooks):**\n" +
+                        "\n".join(f"{len(required_commands)+i+1}. {cmd}" for i, cmd in enumerate(optional_commands)) +
+                        "\n\nWould you like me to run these commands? You can choose to run all of them, "
+                        "just the required ones, or handle them individually."
+                    )
+                elif optional_commands and not required_commands:
+                    response["recommendation"] = (
+                        f"Your Code Query MCP setup for '{project_name}' is mostly complete! "
+                        f"The only missing components are optional git hooks:\n\n" +
+                        "\n".join(f"{i+1}. {cmd}" for i, cmd in enumerate(optional_commands)) +
+                        "\n\nThese git hooks are optional but recommended for automatic documentation updates. "
+                        "Would you like me to install them?"
+                    )
+                else:
+                    response["recommendation"] = (
+                        f"To complete the Code Query MCP setup for '{project_name}', "
+                        f"I recommend running these {len(recommended_commands)} commands:\n\n" +
+                        "\n".join(f"{i+1}. {cmd}" for i, cmd in enumerate(recommended_commands)) +
+                        "\n\nWould you like me to run these setup commands now?"
+                    )
                 response["commands_to_run"] = recommended_commands
             else:
                 response["recommendation"] = (
@@ -2142,7 +2179,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="recommend_setup",
-            description="Get setup recommendations for Code Query MCP. This analyzes your project and recommends the necessary setup steps including data import, configuration, and git hooks. Use this when starting with a new project.",
+            description="Check your project setup and get recommendations for Code Query MCP. This tool only analyzes your current state - it does NOT make any changes. It will: 1) Check for existing datasets that match your project, 2) Detect if configuration files exist, 3) Check git hook status, and 4) Recommend next steps. Use this to see what setup is needed without modifying anything.",
             inputSchema={
                 "type": "object",
                 "properties": {
