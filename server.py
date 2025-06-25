@@ -1878,7 +1878,7 @@ exit 0
             
             # Check if any datasets exist
             existing_datasets = self.list_datasets()
-            has_datasets = len(existing_datasets.get("datasets", [])) > 0
+            has_datasets = len(existing_datasets) > 0
             
             # Generate project name suggestion if not provided
             if not project_name:
@@ -1928,8 +1928,8 @@ exit 0
                 setup_steps.append({
                     "step": 1,
                     "action": "Use existing dataset",
-                    "reason": f"Found {len(existing_datasets['datasets'])} existing dataset(s)",
-                    "datasets": existing_datasets["datasets"]
+                    "reason": f"Found {len(existing_datasets)} existing dataset(s)",
+                    "datasets": existing_datasets
                 })
             
             # Step 2: Create configuration
@@ -1980,7 +1980,7 @@ exit 0
                     "config_exists": config_exists,
                     "git_repository": git_exists,
                     "has_datasets": has_datasets,
-                    "dataset_count": len(existing_datasets.get("datasets", []))
+                    "dataset_count": len(existing_datasets)
                 },
                 "setup_needed": len(setup_steps) > 0,
                 "setup_steps": setup_steps
