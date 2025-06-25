@@ -821,6 +821,83 @@ Focus on being concise but comprehensive. Identify the core purpose and key elem
                 "message": f"Error creating configuration: {str(e)}"
             }
     
+    def fork_dataset(self, source_dataset: str, target_dataset: str) -> Dict[str, Any]:
+        """Fork (copy) a dataset to a new name, useful for git worktrees."""
+        try:
+            # Check if source dataset exists
+            source_metadata = self.db.execute(
+                "SELECT * FROM dataset_metadata WHERE dataset_id = ?",
+                (source_dataset,)
+            ).fetchone()
+            
+            if not source_metadata:
+                return {
+                    "success": False,
+                    "message": f"Source dataset '{source_dataset}' not found. Use list_datasets to see available datasets."
+                }
+            
+            # Check if target dataset already exists
+            target_exists = self.db.execute(
+                "SELECT dataset_id FROM dataset_metadata WHERE dataset_id = ?",
+                (target_dataset,)
+            ).fetchone()
+            
+            if target_exists:
+                return {
+                    "success": False,
+                    "message": f"Target dataset '{target_dataset}' already exists. Choose a different name or clear it first."
+                }
+            
+            # Copy all files from source to target dataset
+            files_copied = 0
+            cursor = self.db.execute(
+                """SELECT * FROM files WHERE dataset_id = ?""",
+                (source_dataset,)
+            )
+            
+            for row in cursor:
+                self.db.execute("""
+                    INSERT INTO files (
+                        dataset_id, filepath, filename, overview, ddd_context,
+                        functions, exports, imports, types_interfaces_classes,
+                        constants, dependencies, other_notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    target_dataset, row['filepath'], row['filename'],
+                    row['overview'], row['ddd_context'], row['functions'],
+                    row['exports'], row['imports'], row['types_interfaces_classes'],
+                    row['constants'], row['dependencies'], row['other_notes']
+                ))
+                files_copied += 1
+            
+            # Create metadata entry for target dataset
+            self.db.execute("""
+                INSERT INTO dataset_metadata 
+                (dataset_id, source_dir, files_count, loaded_at)
+                VALUES (?, ?, ?, ?)
+            """, (
+                target_dataset,
+                f"{source_metadata['source_dir']} (forked from {source_dataset})",
+                files_copied,
+                datetime.now()
+            ))
+            
+            self.db.commit()
+            
+            return {
+                "success": True,
+                "message": f"Successfully forked dataset '{source_dataset}' to '{target_dataset}'",
+                "files_copied": files_copied,
+                "source_dataset": source_dataset,
+                "target_dataset": target_dataset
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error forking dataset: {str(e)}"
+            }
+    
     def install_pre_commit_hook(self, dataset_name: str, mode: str = "queue") -> Dict[str, Any]:
         """Install pre-commit hook for automatic documentation updates."""
         try:
@@ -852,14 +929,51 @@ Focus on being concise but comprehensive. Identify the core purpose and key elem
             pre_commit_hook = """#!/bin/bash
 # Code Query MCP Pre-commit Hook
 # This hook queues changed files for documentation updates
+# Supports git worktrees with separate datasets
 
 CONFIG_FILE=".code-query/config.json"
 QUEUE_FILE=".code-query/update_queue.txt"
+
+# Function to get worktree-specific dataset name
+get_dataset_name() {
+    local base_dataset="$1"
+    
+    # Check if we're in a worktree
+    GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+    if [ -z "$GIT_DIR" ]; then
+        echo "$base_dataset"
+        return
+    fi
+    
+    # Check if this is a worktree (not the main git dir)
+    if [[ "$GIT_DIR" == *".git/worktrees/"* ]]; then
+        # Extract worktree name from path
+        WORKTREE_NAME=$(echo "$GIT_DIR" | sed 's/.*\\.git\\/worktrees\\/\\([^\\/]*\\).*/\\1/')
+        echo "${base_dataset}-wt-${WORKTREE_NAME}"
+    else
+        echo "$base_dataset"
+    fi
+}
 
 # Check if configuration exists
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Warning: Code Query configuration not found. Skipping documentation queue."
     exit 0
+fi
+
+# Get base dataset name from config
+BASE_DATASET=$(jq -r '.datasetName' "$CONFIG_FILE" 2>/dev/null)
+if [ -z "$BASE_DATASET" ] || [ "$BASE_DATASET" = "null" ]; then
+    echo "Warning: Dataset name not found in configuration."
+    exit 0
+fi
+
+# Get worktree-aware dataset name
+DATASET_NAME=$(get_dataset_name "$BASE_DATASET")
+
+# Show worktree info if applicable
+if [ "$DATASET_NAME" != "$BASE_DATASET" ]; then
+    echo "📌 Code Query: Using worktree dataset '$DATASET_NAME'"
 fi
 
 # Get staged files (Added, Copied, Modified, Deleted)
@@ -892,6 +1006,7 @@ exit 0
             # Git doc-update script content
             git_doc_update = """#!/bin/bash
 # Code Query Documentation Update Script
+# Supports git worktrees with separate datasets
 
 CONFIG_FILE=".code-query/config.json"
 QUEUE_FILE=".code-query/update_queue.txt"
@@ -900,6 +1015,27 @@ QUEUE_FILE=".code-query/update_queue.txt"
 error_exit() {
     echo "Error: $1" >&2
     exit 1
+}
+
+# Function to get worktree-specific dataset name
+get_dataset_name() {
+    local base_dataset="$1"
+    
+    # Check if we're in a worktree
+    GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+    if [ -z "$GIT_DIR" ]; then
+        echo "$base_dataset"
+        return
+    fi
+    
+    # Check if this is a worktree (not the main git dir)
+    if [[ "$GIT_DIR" == *".git/worktrees/"* ]]; then
+        # Extract worktree name from path
+        WORKTREE_NAME=$(echo "$GIT_DIR" | sed 's/.*\\.git\\/worktrees\\/\\([^\\/]*\\).*/\\1/')
+        echo "${base_dataset}-wt-${WORKTREE_NAME}"
+    else
+        echo "$base_dataset"
+    fi
 }
 
 # Check dependencies
@@ -916,10 +1052,33 @@ if [ ! -f "$CONFIG_FILE" ]; then
     error_exit "Configuration file not found. Run: claude --print \"Use code-query MCP to install pre-commit hook for dataset 'your-dataset-name'\""
 fi
 
-# Get dataset name
-DATASET_NAME=$(jq -r '.datasetName' "$CONFIG_FILE")
-if [ -z "$DATASET_NAME" ] || [ "$DATASET_NAME" = "null" ]; then
+# Get base dataset name from config
+BASE_DATASET=$(jq -r '.datasetName' "$CONFIG_FILE")
+if [ -z "$BASE_DATASET" ] || [ "$BASE_DATASET" = "null" ]; then
     error_exit "Dataset name not found in configuration."
+fi
+
+# Get worktree-aware dataset name
+DATASET_NAME=$(get_dataset_name "$BASE_DATASET")
+
+# Show worktree info if applicable
+if [ "$DATASET_NAME" != "$BASE_DATASET" ]; then
+    echo "📌 Using worktree dataset: $DATASET_NAME"
+    echo ""
+    
+    # Check if worktree dataset exists
+    claude --print "Use code-query MCP to list datasets" 2>/dev/null | grep -q "\"$DATASET_NAME\""
+    if [ $? -ne 0 ]; then
+        echo "⚠️  Worktree dataset '$DATASET_NAME' not found."
+        echo ""
+        echo "Creating worktree dataset by forking from '$BASE_DATASET'..."
+        claude --print "Use code-query MCP to fork dataset from '$BASE_DATASET' to '$DATASET_NAME'"
+        if [ $? -ne 0 ]; then
+            error_exit "Failed to create worktree dataset"
+        fi
+        echo "✅ Worktree dataset created successfully."
+        echo ""
+    fi
 fi
 
 # Check queue file
@@ -1040,6 +1199,149 @@ fi
             return {
                 "success": False,
                 "message": f"Error installing pre-commit hook: {str(e)}"
+            }
+    
+    def install_post_merge_hook(self, main_dataset: str = None) -> Dict[str, Any]:
+        """Install post-merge hook for syncing worktree changes back to main dataset."""
+        try:
+            # Check if we're in a git repository
+            git_dir = os.path.join(self.cwd, ".git")
+            if not os.path.exists(git_dir):
+                return {
+                    "success": False,
+                    "message": "Not in a git repository. Please run this from the root of your git project."
+                }
+            
+            # Read config to get main dataset name if not provided
+            config_path = os.path.join(self.cwd, ".code-query", "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    if not main_dataset:
+                        main_dataset = config.get("datasetName")
+            
+            if not main_dataset:
+                return {
+                    "success": False,
+                    "message": "Main dataset name not provided and not found in config. Please specify the main dataset name."
+                }
+            
+            # Post-merge hook content
+            post_merge_hook = f"""#!/bin/bash
+# Code Query MCP Post-merge Hook
+# This hook syncs changes from worktree datasets back to main dataset
+
+CONFIG_FILE=".code-query/config.json"
+MAIN_DATASET="{main_dataset}"
+
+# Function to get worktree-specific dataset name
+get_dataset_name() {{
+    local base_dataset="$1"
+    
+    # Check if we're in a worktree
+    GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+    if [ -z "$GIT_DIR" ]; then
+        echo "$base_dataset"
+        return
+    fi
+    
+    # Check if this is a worktree (not the main git dir)
+    if [[ "$GIT_DIR" == *".git/worktrees/"* ]]; then
+        # Extract worktree name from path
+        WORKTREE_NAME=$(echo "$GIT_DIR" | sed 's/.*\\.git\\/worktrees\\/\\([^\\/]*\\).*/\\1/')
+        echo "${{base_dataset}}-wt-${{WORKTREE_NAME}}"
+    else
+        echo "$base_dataset"
+    fi
+}}
+
+# Check if configuration exists
+if [ ! -f "$CONFIG_FILE" ]; then
+    exit 0  # Silently exit if no config
+fi
+
+# Get base dataset name from config
+BASE_DATASET=$(jq -r '.datasetName' "$CONFIG_FILE" 2>/dev/null)
+if [ -z "$BASE_DATASET" ] || [ "$BASE_DATASET" = "null" ]; then
+    exit 0  # Silently exit if no dataset name
+fi
+
+# Get worktree-aware dataset name
+CURRENT_DATASET=$(get_dataset_name "$BASE_DATASET")
+
+# Only proceed if we're in a worktree
+if [ "$CURRENT_DATASET" = "$BASE_DATASET" ]; then
+    exit 0  # Not in a worktree, nothing to sync
+fi
+
+# Check if we just merged from main branch
+MERGED_FROM=$(git reflog -1 | grep -o "merge [^:]*" | cut -d' ' -f2)
+if [[ "$MERGED_FROM" == *"main"* ]] || [[ "$MERGED_FROM" == *"master"* ]]; then
+    echo "📄 Code Query: Detected merge from main branch"
+    echo "   Syncing documentation from worktree dataset '$CURRENT_DATASET' to main dataset '$MAIN_DATASET'"
+    
+    # Get list of changed files in the merge
+    CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD)
+    
+    if [ -n "$CHANGED_FILES" ]; then
+        # Build file list for Claude
+        FILE_LIST=""
+        while IFS= read -r file; do
+            if [ -n "$FILE_LIST" ]; then
+                FILE_LIST="$FILE_LIST, '$file'"
+            else
+                FILE_LIST="'$file'"
+            fi
+        done <<< "$CHANGED_FILES"
+        
+        echo "   Files to sync: $FILE_LIST"
+        echo ""
+        
+        # Use Claude to sync the files
+        claude --print "Use code-query MCP to copy documentation for files $FILE_LIST from dataset '$CURRENT_DATASET' to dataset '$MAIN_DATASET'"
+    fi
+fi
+
+exit 0
+"""
+            
+            # Write post-merge hook
+            hook_path = os.path.join(git_dir, "hooks", "post-merge")
+            
+            # Check if hook already exists
+            if os.path.exists(hook_path):
+                with open(hook_path, 'r') as f:
+                    existing_content = f.read()
+                    if "Code Query MCP Post-merge Hook" not in existing_content:
+                        return {
+                            "success": False,
+                            "message": "A post-merge hook already exists. Please manually integrate or remove it first."
+                        }
+            
+            # Write the hook
+            with open(hook_path, 'w') as f:
+                f.write(post_merge_hook)
+            
+            # Make hook executable
+            os.chmod(hook_path, 0o755)
+            
+            return {
+                "success": True,
+                "message": f"Successfully installed post-merge hook for main dataset '{main_dataset}'",
+                "details": {
+                    "hook_path": hook_path,
+                    "main_dataset": main_dataset
+                },
+                "next_steps": [
+                    "The post-merge hook will sync changes from worktree datasets back to main",
+                    "This happens automatically when merging from main/master branches"
+                ]
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error installing post-merge hook: {str(e)}"
             }
 
 
@@ -1359,6 +1661,38 @@ async def list_tools() -> List[Tool]:
                 },
                 "required": ["dataset_name"]
             }
+        ),
+        Tool(
+            name="fork_dataset",
+            description="Fork (copy) a dataset to a new name. Useful for git worktrees where you want to work on the same codebase with different branches. Use list_datasets first if you don't know the source dataset name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_dataset": {
+                        "type": "string",
+                        "description": "Source dataset to copy from. Use list_datasets tool if unknown."
+                    },
+                    "target_dataset": {
+                        "type": "string",
+                        "description": "New dataset name to create"
+                    }
+                },
+                "required": ["source_dataset", "target_dataset"]
+            }
+        ),
+        Tool(
+            name="install_post_merge_hook",
+            description="Install post-merge hook for syncing worktree changes back to main dataset",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "main_dataset": {
+                        "type": "string",
+                        "description": "Main dataset name to sync to (defaults to config datasetName)"
+                    }
+                },
+                "required": []
+            }
         )
     ]
 
@@ -1472,6 +1806,17 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         dataset_name = arguments.get("dataset_name", "")
         exclude_patterns = arguments.get("exclude_patterns")
         result = query_server.create_project_config(dataset_name, exclude_patterns)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
+    elif name == "fork_dataset":
+        source_dataset = arguments.get("source_dataset", "")
+        target_dataset = arguments.get("target_dataset", "")
+        result = query_server.fork_dataset(source_dataset, target_dataset)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
+    elif name == "install_post_merge_hook":
+        main_dataset = arguments.get("main_dataset")
+        result = query_server.install_post_merge_hook(main_dataset)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
     else:

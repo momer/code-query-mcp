@@ -297,6 +297,8 @@ Generate orchestration instructions for documenting a codebase:
 | `get_project_config` | Get project configuration | - |
 | `install_pre_commit_hook` | Install git pre-commit hook | `dataset_name`, `mode?` |
 | `create_project_config` | Create/update project configuration | `dataset_name`, `exclude_patterns?` |
+| `fork_dataset` | Fork (copy) a dataset to a new name | `source_dataset`, `target_dataset` |
+| `install_post_merge_hook` | Install git post-merge hook for worktree syncing | `main_dataset?` |
 
 **Note**: When a tool requires a `dataset_name` but you don't know it, the tool descriptions will guide Claude to use `list_datasets` first to discover available datasets.
 
@@ -539,6 +541,60 @@ This creates `.code-query/config.json` with:
 - Dataset name
 - Exclude patterns (defaults to common patterns like test files, node_modules, build dirs)
 - Creation/update timestamps
+
+## Git Worktree Support
+
+The MCP fully supports git worktrees, allowing you to work on different branches with separate documentation datasets.
+
+### How It Works
+
+When you're in a git worktree, the MCP automatically:
+1. Detects the worktree and creates a unique dataset name (e.g., `my-project-wt-feature-branch`)
+2. Forks the main dataset on first use to preserve existing documentation
+3. Maintains separate documentation for each worktree
+4. Syncs changes back to main when merging
+
+### Setup
+
+1. **Create a worktree**:
+   ```bash
+   git worktree add ../my-project-feature feature-branch
+   cd ../my-project-feature
+   ```
+
+2. **Use existing hooks**: The pre-commit hook automatically detects worktrees and uses the appropriate dataset
+
+3. **Optional: Install post-merge hook** for automatic syncing:
+   ```
+   "Use code-query MCP to install post-merge hook"
+   ```
+
+### Fork Dataset Manually
+
+You can manually fork a dataset for any purpose:
+
+**Ask Claude:**
+```
+"Use code-query MCP to fork dataset from 'my-project' to 'my-project-experiment'"
+```
+
+### Workflow Example
+
+1. **Main branch**: Uses dataset `my-project`
+2. **Create worktree**: 
+   ```bash
+   git worktree add ../my-project-feature feature-branch
+   ```
+3. **Work in worktree**: Pre-commit hook uses `my-project-wt-feature`
+4. **First commit in worktree**: Dataset is automatically forked from main
+5. **Merge back to main**: Post-merge hook syncs documentation updates
+
+### Benefits
+
+- **Isolation**: Each worktree has its own documentation dataset
+- **No conflicts**: Changes in different branches don't interfere
+- **Automatic forking**: First use in a worktree creates the dataset
+- **Easy syncing**: Post-merge hook updates main dataset when merging
 
 ## License
 
