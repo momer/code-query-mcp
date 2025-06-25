@@ -48,7 +48,9 @@ Simply say "yes" and Claude will execute all the setup steps automatically!
 - **Dynamic Data Loading**: Import JSON files during conversation, not at startup
 - **Persistent Storage**: SQLite database persists between MCP calls
 - **Multi-Dataset Support**: Load and query multiple datasets with unique names
-- **Efficient Search**: Query specific files without loading entire dataset
+- **Advanced Full-Text Search**: Powered by SQLite FTS5 for fast, relevant results
+- **Typo Correction**: Automatic spell correction using SQLite spellfix1
+- **Search Highlighting**: Results show matched terms highlighted in context
 - **Security**: Path validation prevents directory traversal attacks
 - **Cross-Project Usage**: Works from any directory once installed
 
@@ -57,6 +59,25 @@ Simply say "yes" and Claude will execute all the setup steps automatically!
 ### Prerequisites
 - Python 3.11 or higher
 - pip package manager
+- SQLite 3.9.0 or higher (for FTS5 support)
+
+### SQLite Extensions (Optional but Recommended)
+
+The Code Query MCP uses advanced SQLite features that significantly improve search performance:
+
+1. **FTS5 (Full-Text Search version 5)**
+   - **Availability**: Included in SQLite 3.9.0+ but must be enabled at compile time
+   - **Python sqlite3**: Usually includes FTS5 by default in Python 3.8+
+   - **Benefits**: 10-100x faster searches, relevance ranking, result highlighting
+   - **Check availability**: Run `python -c "import sqlite3; print(sqlite3.sqlite_version)"`
+
+2. **Spellfix1 Extension**
+   - **Availability**: Optional SQLite extension, not included by default
+   - **Installation**: Requires custom SQLite build or loading as extension
+   - **Benefits**: Automatic typo correction in searches
+   - **Note**: If not available, searches still work but without spell correction
+
+**Fallback Support**: If FTS5 or Spellfix1 are not available, the MCP automatically falls back to standard LIKE queries, which are slower but functional.
 
 ### Option 1: Claude Code CLI (Recommended)
 
@@ -193,14 +214,25 @@ Search for files containing specific keywords:
 
 **Response:**
 ```json
-[
-  {
-    "filepath": "src/features/device-management/hooks/useTemperatureData.ts",
-    "filename": "useTemperatureData.ts",
-    "overview": "Hook for managing temperature sensor data",
-    "ddd_context": "device-management"
+{
+  "results": [
+    {
+      "filepath": "src/features/device-management/hooks/useTemperatureData.ts",
+      "filename": "useTemperatureData.ts",
+      "overview": "Hook for managing <mark>temperature</mark> sensor data",
+      "ddd_context": "device-management"
+    }
+  ],
+  "search_info": {
+    "method": "FTS5",
+    "features_used": [
+      "Full-text search with Porter tokenizer",
+      "Spell correction: 'temprature' → 'temperature'",
+      "Result highlighting",
+      "Relevance ranking"
+    ]
   }
-]
+}
 ```
 
 #### 3. Get File Details
@@ -392,15 +424,57 @@ The server creates a `.mcp_code_query/` directory in your current working direct
 - Cannot query across datasets
 - Clear datasets individually when needed
 
+## Enhanced Search Features
+
+### Full-Text Search with FTS5
+
+The Code Query MCP now uses SQLite's FTS5 (Full-Text Search version 5) for lightning-fast, relevant search results:
+
+- **Porter Tokenizer**: Automatically handles word variations (e.g., "authenticate" finds "authentication", "authenticated")
+- **Unicode Support**: Correctly handles international characters and symbols
+- **Relevance Ranking**: Results are sorted by relevance, not just alphabetically
+- **Search Highlighting**: Matched terms are highlighted with `<mark>` tags in search results
+
+Example search results with highlighting:
+```json
+{
+  "filepath": "src/auth/login.ts",
+  "highlighted_overview": "User <mark>authentication</mark> login component with OAuth support"
+}
+```
+
+### Automatic Typo Correction
+
+The search system includes automatic spell correction using SQLite's spellfix1:
+
+- **Smart Corrections**: Automatically suggests corrections for common typos
+- **Edit Distance**: Uses Levenshtein distance algorithm (up to 2 character differences)
+- **Vocabulary Learning**: Builds vocabulary from your actual codebase for better suggestions
+- **Transparent Operation**: Original and corrected queries are searched simultaneously
+
+Example: Searching for "autentication" automatically includes results for "authentication"
+
+### Performance Benefits
+
+FTS5 provides significant performance improvements over traditional LIKE queries:
+
+- **10-100x faster** for large codebases
+- **Better relevance** with built-in ranking algorithms
+- **Lower memory usage** with optimized data structures
+- **Scalable** to millions of files
+
 ## Architecture Notes
 
 ### Database Design
 - Single-table architecture with `dataset_id` column
-- Prevents SQL injection from dynamic table creation
+- FTS5 virtual table for full-text search capabilities
+- Automatic triggers maintain FTS5 synchronization
+- Schema versioning system for smooth upgrades
 - Efficient indexing on `dataset_id` and `filepath`
 
 ### Performance
-- SQLite provides fast full-text search
+- SQLite FTS5 provides lightning-fast full-text search
+- Porter tokenizer reduces index size while improving matches
 - Queries are limited by default to prevent large result sets
 - JSON fields are parsed only when retrieving specific files
 
@@ -408,6 +482,7 @@ The server creates a `.mcp_code_query/` directory in your current working direct
 - Graceful handling of missing files
 - Detailed error messages for troubleshooting
 - Logging for debugging import issues
+- Fallback to LIKE queries if FTS5 unavailable
 
 ## Troubleshooting
 

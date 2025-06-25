@@ -41,6 +41,9 @@ class CodeQueryServer:
         self.db = sqlite3.connect(DB_PATH)
         self.db.row_factory = sqlite3.Row
         
+        # Enable FTS5 if available
+        self.db.execute("PRAGMA compile_options")
+        
         # Check if schema exists
         cursor = self.db.execute("""
             SELECT name FROM sqlite_master 
@@ -51,10 +54,12 @@ class CodeQueryServer:
             self._create_schema()
             logging.info(f"Created database schema at {DB_PATH}")
         else:
+            # Check if we need to migrate to newer schema
+            self._migrate_schema()
             logging.info(f"Connected to existing database at {DB_PATH}")
     
     def _create_schema(self):
-        """Create database schema with dataset support."""
+        """Create database schema with dataset support and FTS5."""
         # Main files table with dataset_id
         self.db.execute("""
             CREATE TABLE files (
@@ -79,17 +84,210 @@ class CodeQueryServer:
             CREATE INDEX idx_dataset_filepath ON files(dataset_id, filepath)
         """)
         
+        # FTS5 virtual table for full-text search
+        self.db.execute("""
+            CREATE VIRTUAL TABLE files_fts USING fts5(
+                dataset_id UNINDEXED,
+                filepath,
+                filename,
+                overview,
+                ddd_context,
+                functions,
+                exports,
+                imports,
+                types_interfaces_classes,
+                constants,
+                dependencies,
+                other_notes,
+                content=files,
+                content_rowid=rowid,
+                tokenize='porter unicode61'
+            )
+        """)
+        
+        # Triggers to keep FTS5 in sync with main table
+        self.db.execute("""
+            CREATE TRIGGER files_fts_insert AFTER INSERT ON files BEGIN
+                INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, 
+                    ddd_context, functions, exports, imports, types_interfaces_classes,
+                    constants, dependencies, other_notes)
+                VALUES (new.rowid, new.dataset_id, new.filepath, new.filename, new.overview,
+                    new.ddd_context, new.functions, new.exports, new.imports, 
+                    new.types_interfaces_classes, new.constants, new.dependencies, new.other_notes);
+            END
+        """)
+        
+        self.db.execute("""
+            CREATE TRIGGER files_fts_update AFTER UPDATE ON files BEGIN
+                UPDATE files_fts SET 
+                    dataset_id = new.dataset_id,
+                    filepath = new.filepath,
+                    filename = new.filename,
+                    overview = new.overview,
+                    ddd_context = new.ddd_context,
+                    functions = new.functions,
+                    exports = new.exports,
+                    imports = new.imports,
+                    types_interfaces_classes = new.types_interfaces_classes,
+                    constants = new.constants,
+                    dependencies = new.dependencies,
+                    other_notes = new.other_notes
+                WHERE rowid = new.rowid;
+            END
+        """)
+        
+        self.db.execute("""
+            CREATE TRIGGER files_fts_delete AFTER DELETE ON files BEGIN
+                DELETE FROM files_fts WHERE rowid = old.rowid;
+            END
+        """)
+        
+        # Spellfix1 virtual table for typo correction
+        try:
+            self.db.execute("""
+                CREATE VIRTUAL TABLE spellfix_terms USING spellfix1
+            """)
+        except sqlite3.OperationalError as e:
+            # Spellfix1 might not be available in all SQLite builds
+            logging.warning(f"Spellfix1 not available: {e}")
+        
         # Metadata table for tracking datasets
         self.db.execute("""
             CREATE TABLE dataset_metadata (
                 dataset_id TEXT PRIMARY KEY,
                 source_dir TEXT,
                 files_count INTEGER,
-                loaded_at TIMESTAMP
+                loaded_at TIMESTAMP,
+                schema_version INTEGER DEFAULT 2
             )
         """)
         
+        # Schema version table for migrations
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        self.db.execute("INSERT INTO schema_version (version) VALUES (2)")
+        
         self.db.commit()
+    
+    def _migrate_schema(self):
+        """Migrate database schema to latest version."""
+        # Check current schema version
+        try:
+            cursor = self.db.execute("SELECT MAX(version) as version FROM schema_version")
+            current_version = cursor.fetchone()['version'] or 1
+        except sqlite3.OperationalError:
+            # schema_version table doesn't exist, we're at version 1
+            current_version = 1
+            self.db.execute("""
+                CREATE TABLE schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            self.db.execute("INSERT INTO schema_version (version) VALUES (1)")
+        
+        # Migrate from version 1 to 2 (add FTS5)
+        if current_version < 2:
+            logging.info("Migrating database schema from version 1 to 2 (adding FTS5)")
+            
+            # Add schema_version column to dataset_metadata if not exists
+            try:
+                self.db.execute("ALTER TABLE dataset_metadata ADD COLUMN schema_version INTEGER DEFAULT 2")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            
+            # Create FTS5 virtual table
+            try:
+                self.db.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+                        dataset_id UNINDEXED,
+                        filepath,
+                        filename,
+                        overview,
+                        ddd_context,
+                        functions,
+                        exports,
+                        imports,
+                        types_interfaces_classes,
+                        constants,
+                        dependencies,
+                        other_notes,
+                        content=files,
+                        content_rowid=rowid,
+                        tokenize='porter unicode61'
+                    )
+                """)
+                
+                # Create triggers
+                self.db.execute("""
+                    CREATE TRIGGER IF NOT EXISTS files_fts_insert AFTER INSERT ON files BEGIN
+                        INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, 
+                            ddd_context, functions, exports, imports, types_interfaces_classes,
+                            constants, dependencies, other_notes)
+                        VALUES (new.rowid, new.dataset_id, new.filepath, new.filename, new.overview,
+                            new.ddd_context, new.functions, new.exports, new.imports, 
+                            new.types_interfaces_classes, new.constants, new.dependencies, new.other_notes);
+                    END
+                """)
+                
+                self.db.execute("""
+                    CREATE TRIGGER IF NOT EXISTS files_fts_update AFTER UPDATE ON files BEGIN
+                        UPDATE files_fts SET 
+                            dataset_id = new.dataset_id,
+                            filepath = new.filepath,
+                            filename = new.filename,
+                            overview = new.overview,
+                            ddd_context = new.ddd_context,
+                            functions = new.functions,
+                            exports = new.exports,
+                            imports = new.imports,
+                            types_interfaces_classes = new.types_interfaces_classes,
+                            constants = new.constants,
+                            dependencies = new.dependencies,
+                            other_notes = new.other_notes
+                        WHERE rowid = new.rowid;
+                    END
+                """)
+                
+                self.db.execute("""
+                    CREATE TRIGGER IF NOT EXISTS files_fts_delete AFTER DELETE ON files BEGIN
+                        DELETE FROM files_fts WHERE rowid = old.rowid;
+                    END
+                """)
+                
+                # Populate FTS5 table with existing data
+                self.db.execute("""
+                    INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, 
+                        ddd_context, functions, exports, imports, types_interfaces_classes,
+                        constants, dependencies, other_notes)
+                    SELECT rowid, dataset_id, filepath, filename, overview,
+                        ddd_context, functions, exports, imports, types_interfaces_classes,
+                        constants, dependencies, other_notes
+                    FROM files
+                """)
+                
+                logging.info("Successfully created FTS5 virtual table and migrated existing data")
+            except sqlite3.OperationalError as e:
+                logging.error(f"Failed to create FTS5 table: {e}")
+                logging.warning("FTS5 may not be available in your SQLite build. Search will use standard LIKE queries.")
+            
+            # Try to create spellfix1 table
+            try:
+                self.db.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS spellfix_terms USING spellfix1
+                """)
+                logging.info("Successfully created spellfix1 virtual table")
+            except sqlite3.OperationalError:
+                logging.warning("Spellfix1 not available in your SQLite build. Typo correction will not be available.")
+            
+            # Update schema version
+            self.db.execute("INSERT INTO schema_version (version) VALUES (2)")
+            self.db.commit()
     
     def validate_directory(self, directory: str) -> str:
         """Validate and resolve directory path."""
@@ -184,6 +382,9 @@ class CodeQueryServer:
             
             self.db.commit()
             
+            # Populate spellfix vocabulary if available
+            self._populate_spellfix_vocabulary(dataset_name)
+            
             result = {
                 "success": True,
                 "dataset_name": dataset_name,
@@ -231,36 +432,193 @@ class CodeQueryServer:
             logging.error(f"Error inserting file data: {e}")
             return False
     
-    def search_files(self, query: str, dataset_name: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search files in specific dataset by query string."""
+    def search_files(self, query: str, dataset_name: str, limit: int = 10) -> Dict[str, Any]:
+        """Search files in specific dataset by query string using FTS5 if available."""
         if not self.db:
-            return []
+            return {"results": [], "search_info": {"method": "No database", "features_used": []}}
         
-        # Search in multiple fields
+        # Check if FTS5 is available
         cursor = self.db.execute("""
-            SELECT filepath, filename, overview, ddd_context
-            FROM files
-            WHERE dataset_id = ? AND (
-                filename LIKE ? OR filepath LIKE ? OR overview LIKE ? 
-                OR ddd_context LIKE ? OR functions LIKE ? OR other_notes LIKE ?
-            )
-            LIMIT ?
-        """, (
-            dataset_name,
-            f'%{query}%', f'%{query}%', f'%{query}%',
-            f'%{query}%', f'%{query}%', f'%{query}%', limit
-        ))
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='files_fts'
+        """)
+        
+        has_fts5 = cursor.fetchone() is not None
+        search_metadata = {
+            "method": "LIKE",
+            "features_used": []
+        }
+        
+        if has_fts5:
+            # Use FTS5 for better search
+            search_metadata["method"] = "FTS5"
+            search_metadata["features_used"].append("Full-text search with Porter tokenizer")
+            
+            # Clean query for FTS5 - escape special characters
+            fts_query = query.replace('"', '""')
+            
+            # Try spell correction if available
+            corrected_query = self._get_spell_corrected_query(query)
+            if corrected_query and corrected_query != query:
+                logging.info(f"Spell correction: '{query}' -> '{corrected_query}'")
+                search_metadata["features_used"].append(f"Spell correction: '{query}' → '{corrected_query}'")
+                fts_query = f'({fts_query} OR {corrected_query})'
+            
+            cursor = self.db.execute("""
+                SELECT DISTINCT f.filepath, f.filename, f.overview, f.ddd_context,
+                       highlight(files_fts, 2, '<mark>', '</mark>') as highlighted_overview,
+                       rank * -1 as relevance
+                FROM files_fts fts
+                JOIN files f ON f.rowid = fts.rowid
+                WHERE fts.dataset_id = ? AND files_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+            """, (dataset_name, fts_query, limit))
+            
+            search_metadata["features_used"].append("Result highlighting")
+            search_metadata["features_used"].append("Relevance ranking")
+        else:
+            # Fallback to LIKE queries
+            search_metadata["features_used"].append("Pattern matching across all fields")
+            cursor = self.db.execute("""
+                SELECT filepath, filename, overview, ddd_context
+                FROM files
+                WHERE dataset_id = ? AND (
+                    filename LIKE ? OR filepath LIKE ? OR overview LIKE ? 
+                    OR ddd_context LIKE ? OR functions LIKE ? OR other_notes LIKE ?
+                )
+                LIMIT ?
+            """, (
+                dataset_name,
+                f'%{query}%', f'%{query}%', f'%{query}%',
+                f'%{query}%', f'%{query}%', f'%{query}%', limit
+            ))
         
         results = []
         for row in cursor:
-            results.append({
+            result = {
                 'filepath': row['filepath'],
                 'filename': row['filename'],
                 'overview': row['overview'],
                 'ddd_context': row['ddd_context']
-            })
+            }
+            # Include highlighted overview if available
+            if has_fts5 and 'highlighted_overview' in row.keys():
+                if row['highlighted_overview']:
+                    result['overview'] = row['highlighted_overview']
+            results.append(result)
         
-        return results
+        return {
+            "results": results,
+            "search_info": search_metadata
+        }
+    
+    def _get_spell_corrected_query(self, query: str) -> Optional[str]:
+        """Get spell-corrected version of query using spellfix1 if available."""
+        try:
+            # Check if spellfix1 is available
+            cursor = self.db.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='spellfix_terms'
+            """)
+            
+            if not cursor.fetchone():
+                return None
+            
+            # Split query into words and correct each
+            words = query.split()
+            corrected_words = []
+            
+            for word in words:
+                cursor = self.db.execute("""
+                    SELECT word FROM spellfix_terms 
+                    WHERE word MATCH ? AND distance <= 2
+                    ORDER BY score
+                    LIMIT 1
+                """, (word,))
+                
+                result = cursor.fetchone()
+                if result:
+                    corrected_words.append(result['word'])
+                else:
+                    corrected_words.append(word)
+            
+            corrected = ' '.join(corrected_words)
+            return corrected if corrected != query else None
+            
+        except Exception as e:
+            logging.debug(f"Spell correction failed: {e}")
+            return None
+    
+    def _populate_spellfix_vocabulary(self, dataset_name: str):
+        """Populate spellfix1 vocabulary from dataset for better typo correction."""
+        try:
+            # Check if spellfix1 is available
+            cursor = self.db.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='spellfix_terms'
+            """)
+            
+            if not cursor.fetchone():
+                return
+            
+            # Extract unique words from the dataset
+            cursor = self.db.execute("""
+                SELECT DISTINCT filename, overview, ddd_context
+                FROM files
+                WHERE dataset_id = ?
+            """, (dataset_name,))
+            
+            vocabulary = set()
+            for row in cursor:
+                # Extract words from text fields
+                for field in ['filename', 'overview', 'ddd_context']:
+                    if row[field]:
+                        # Simple word extraction (could be improved with proper tokenization)
+                        words = row[field].replace('_', ' ').replace('-', ' ').replace('/', ' ').split()
+                        for word in words:
+                            # Clean and filter words
+                            word = word.strip('.,;:!?"\'()[]{}').lower()
+                            if len(word) > 2 and word.isalnum():
+                                vocabulary.add(word)
+            
+            # Insert vocabulary into spellfix1
+            for word in vocabulary:
+                try:
+                    self.db.execute("INSERT OR IGNORE INTO spellfix_terms(word) VALUES (?)", (word,))
+                except Exception:
+                    pass  # Ignore individual word insertion errors
+            
+            self.db.commit()
+            logging.info(f"Added {len(vocabulary)} words to spellfix vocabulary for dataset '{dataset_name}'")
+            
+        except Exception as e:
+            logging.debug(f"Failed to populate spellfix vocabulary: {e}")
+    
+    def rebuild_fts_index(self, dataset_name: str = None):
+        """Rebuild FTS5 index for better performance after bulk operations."""
+        try:
+            # Check if FTS5 is available
+            cursor = self.db.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='files_fts'
+            """)
+            
+            if not cursor.fetchone():
+                return {"success": False, "message": "FTS5 not available"}
+            
+            if dataset_name:
+                # Rebuild for specific dataset
+                self.db.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+            else:
+                # Optimize the entire FTS index
+                self.db.execute("INSERT INTO files_fts(files_fts) VALUES('optimize')")
+            
+            self.db.commit()
+            return {"success": True, "message": "FTS5 index rebuilt successfully"}
+            
+        except Exception as e:
+            return {"success": False, "message": f"Failed to rebuild FTS5 index: {e}"}
     
     def get_file(self, filepath: str, dataset_name: str, limit: int = 10) -> Optional[Dict[str, Any] | List[Dict[str, Any]]]:
         """Get complete details for a specific file in dataset.
