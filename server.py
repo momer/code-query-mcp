@@ -11,6 +11,8 @@ from typing import List, Dict, Any, Optional
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.stdio import stdio_server
+from mcp.server.models import InitializationOptions
+from mcp.server.lowlevel import NotificationOptions
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -86,21 +88,19 @@ class CodeQueryServer:
         """Validate and resolve directory path."""
         # Prevent absolute paths
         if os.path.isabs(directory):
-            raise ValueError("Absolute paths not allowed")
+            raise ValueError("Absolute paths are not allowed for security reasons.")
         
-        # Prevent parent directory traversal
-        if ".." in directory:
-            raise ValueError("Parent directory references not allowed")
+        # Resolve the real path to guard against traversal attacks
+        # os.path.normpath is not enough, realpath resolves '..' and symlinks
+        full_path = os.path.realpath(os.path.join(self.cwd, directory))
+        cwd_real = os.path.realpath(self.cwd)
         
-        # Resolve full path
-        full_path = os.path.join(self.cwd, directory)
+        if not full_path.startswith(cwd_real):
+            raise ValueError("Path traversal attempt detected. Only subdirectories are allowed.")
         
         # Check if directory exists
-        if not os.path.exists(full_path):
-            raise ValueError(f"Directory not found: {directory}")
-        
         if not os.path.isdir(full_path):
-            raise ValueError(f"Not a directory: {directory}")
+            raise ValueError(f"Directory not found or is not a directory: {directory}")
         
         return full_path
     
@@ -134,12 +134,10 @@ class CodeQueryServer:
                 os.path.join(full_path, "*.json")
             ]
             
-            json_files = []
+            # Use a set to avoid duplicates if a file matches multiple patterns
+            json_files = set()
             for pattern in patterns:
-                files = glob.glob(pattern)
-                json_files.extend(files)
-                if files:
-                    break
+                json_files.update(glob.glob(pattern))
             
             if not json_files:
                 return {
@@ -277,7 +275,8 @@ class CodeQueryServer:
             if result.get(field):
                 try:
                     result[field] = json.loads(result[field])
-                except:
+                except (json.JSONDecodeError, TypeError):
+                    logging.warning(f"Could not parse JSON for field '{field}' in file '{filepath}'. Using default value.")
                     result[field] = {} if field not in ['dependencies', 'other_notes'] else []
         
         # Remove dataset_id from result (it's in the query)
@@ -534,8 +533,6 @@ async def main():
     
     # Run the server
     async with stdio_server() as (read_stream, write_stream):
-        from mcp.server.models import InitializationOptions
-        from mcp.server.lowlevel import NotificationOptions
         await server.run(
             read_stream,
             write_stream,
