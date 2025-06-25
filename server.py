@@ -913,7 +913,7 @@ fi
 
 # Check configuration
 if [ ! -f "$CONFIG_FILE" ]; then
-    error_exit "Configuration file not found. Run 'claude mcp install-pre-commit-hook' first."
+    error_exit "Configuration file not found. Run: claude --print \"Use code-query MCP to install pre-commit hook for dataset 'your-dataset-name'\""
 fi
 
 # Get dataset name
