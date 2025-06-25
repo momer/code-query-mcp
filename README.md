@@ -296,6 +296,7 @@ Generate orchestration instructions for documenting a codebase:
 | `update_file_documentation` | Update existing file documentation | `dataset_name`, `filepath`, plus any fields to update |
 | `get_project_config` | Get project configuration | - |
 | `install_pre_commit_hook` | Install git pre-commit hook | `dataset_name`, `mode?` |
+| `create_project_config` | Create/update project configuration | `dataset_name`, `exclude_patterns?` |
 
 **Note**: When a tool requires a `dataset_name` but you don't know it, the tool descriptions will guide Claude to use `list_datasets` first to discover available datasets.
 
@@ -523,6 +524,21 @@ The `.code-query/config.json` file stores:
 - The hook is non-blocking - commits always succeed
 - Documentation updates require internet access (for Claude API)
 - Each file takes 5-30 seconds to analyze
+
+### Create Project Configuration
+
+If you need to create or update a project configuration file (e.g., data was imported but no config exists):
+
+**Ask Claude:**
+```
+"Use code-query MCP to create project config for dataset 'my-project'"
+"Use code-query MCP to create project config for 'my-project' excluding ['*.log', 'tmp/*']"
+```
+
+This creates `.code-query/config.json` with:
+- Dataset name
+- Exclude patterns (defaults to common patterns like test files, node_modules, build dirs)
+- Creation/update timestamps
 
 ## License
 

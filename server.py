@@ -766,6 +766,61 @@ Focus on being concise but comprehensive. Identify the core purpose and key elem
                 "message": f"Error reading configuration: {str(e)}"
             }
     
+    def create_project_config(self, dataset_name: str, exclude_patterns: List[str] = None) -> Dict[str, Any]:
+        """Create or update project configuration file."""
+        try:
+            # Create .code-query directory
+            code_query_dir = os.path.join(self.cwd, ".code-query")
+            os.makedirs(code_query_dir, exist_ok=True)
+            
+            # Set default exclude patterns if not provided
+            if exclude_patterns is None:
+                exclude_patterns = ["*.test.js", "*.spec.ts", "node_modules/*", ".git/*", "build/*", "dist/*"]
+            
+            # Create configuration
+            config = {
+                "datasetName": dataset_name,
+                "excludePatterns": exclude_patterns,
+                "createdAt": datetime.now().isoformat()
+            }
+            
+            # Check if config already exists
+            config_path = os.path.join(code_query_dir, "config.json")
+            if os.path.exists(config_path):
+                # Read existing config
+                with open(config_path, 'r') as f:
+                    existing_config = json.load(f)
+                
+                # Update with new values but preserve existing ones
+                config["updatedAt"] = datetime.now().isoformat()
+                if "createdAt" in existing_config:
+                    config["createdAt"] = existing_config["createdAt"]
+                if "mode" in existing_config:
+                    config["mode"] = existing_config["mode"]
+            
+            # Write configuration
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            
+            # Create .gitignore if needed
+            gitignore_path = os.path.join(code_query_dir, ".gitignore")
+            if not os.path.exists(gitignore_path):
+                with open(gitignore_path, 'w') as f:
+                    f.write("update_queue.txt\n")
+            
+            return {
+                "success": True,
+                "message": f"Successfully created/updated configuration for dataset '{dataset_name}'",
+                "config_path": config_path,
+                "config": config
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error creating configuration: {str(e)}"
+            }
+    
     def install_pre_commit_hook(self, dataset_name: str, mode: str = "queue") -> Dict[str, Any]:
         """Install pre-commit hook for automatic documentation updates."""
         try:
@@ -1285,6 +1340,25 @@ async def list_tools() -> List[Tool]:
                 },
                 "required": ["dataset_name"]
             }
+        ),
+        Tool(
+            name="create_project_config",
+            description="Create or update code-query project configuration file (.code-query/config.json)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset name for this project"
+                    },
+                    "exclude_patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Patterns to exclude (e.g., '*.test.js', 'node_modules/*'). Defaults to common exclusions if not provided."
+                    }
+                },
+                "required": ["dataset_name"]
+            }
         )
     ]
 
@@ -1392,6 +1466,12 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         dataset_name = arguments.get("dataset_name", "")
         mode = arguments.get("mode", "queue")
         result = query_server.install_pre_commit_hook(dataset_name, mode)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
+    elif name == "create_project_config":
+        dataset_name = arguments.get("dataset_name", "")
+        exclude_patterns = arguments.get("exclude_patterns")
+        result = query_server.create_project_config(dataset_name, exclude_patterns)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
     else:
