@@ -1343,6 +1343,145 @@ exit 0
                 "success": False,
                 "message": f"Error installing post-merge hook: {str(e)}"
             }
+    
+    def recommend_setup(self, project_name: str = None, source_directory: str = None) -> Dict[str, Any]:
+        """Recommend complete setup process for a new project."""
+        try:
+            # Check current state
+            config_exists = os.path.exists(os.path.join(self.cwd, ".code-query", "config.json"))
+            git_exists = os.path.exists(os.path.join(self.cwd, ".git"))
+            
+            # Check if any datasets exist
+            existing_datasets = self.list_datasets()
+            has_datasets = len(existing_datasets.get("datasets", [])) > 0
+            
+            # Generate project name suggestion if not provided
+            if not project_name:
+                # Try to get from git remote or directory name
+                project_name = os.path.basename(self.cwd)
+                if git_exists:
+                    try:
+                        import subprocess
+                        remote_url = subprocess.check_output(
+                            ["git", "config", "--get", "remote.origin.url"],
+                            cwd=self.cwd, text=True
+                        ).strip()
+                        if remote_url:
+                            # Extract repo name from URL
+                            repo_name = remote_url.split("/")[-1].replace(".git", "")
+                            if repo_name:
+                                project_name = repo_name
+                    except:
+                        pass
+            
+            # Default source directory
+            if not source_directory:
+                # Check common patterns
+                for common_dir in ["src", "lib", "app", "."]:
+                    if os.path.exists(os.path.join(self.cwd, common_dir)):
+                        source_directory = common_dir
+                        break
+                else:
+                    source_directory = "."
+            
+            # Build recommendations
+            setup_steps = []
+            recommended_commands = []
+            
+            # Step 1: Document or import data
+            if not has_datasets:
+                setup_steps.append({
+                    "step": 1,
+                    "action": "Document your codebase",
+                    "reason": "No datasets found. Need to analyze and document your code.",
+                    "command": f"document_directory('{project_name}', '{source_directory}')"
+                })
+                recommended_commands.append(
+                    f"Use code-query MCP to document directory '{source_directory}' as '{project_name}'"
+                )
+            else:
+                setup_steps.append({
+                    "step": 1,
+                    "action": "Use existing dataset",
+                    "reason": f"Found {len(existing_datasets['datasets'])} existing dataset(s)",
+                    "datasets": existing_datasets["datasets"]
+                })
+            
+            # Step 2: Create configuration
+            if not config_exists:
+                setup_steps.append({
+                    "step": 2,
+                    "action": "Create project configuration",
+                    "reason": "No .code-query/config.json found",
+                    "command": f"create_project_config('{project_name}')"
+                })
+                recommended_commands.append(
+                    f"Use code-query MCP to create project config for '{project_name}'"
+                )
+            
+            # Step 3: Install git hooks
+            if git_exists:
+                pre_commit_exists = os.path.exists(os.path.join(self.cwd, ".git", "hooks", "pre-commit"))
+                post_merge_exists = os.path.exists(os.path.join(self.cwd, ".git", "hooks", "post-merge"))
+                
+                if not pre_commit_exists:
+                    setup_steps.append({
+                        "step": 3,
+                        "action": "Install pre-commit hook",
+                        "reason": "Automatically queue changed files for documentation updates",
+                        "command": f"install_pre_commit_hook('{project_name}')"
+                    })
+                    recommended_commands.append(
+                        f"Use code-query MCP to install pre-commit hook for '{project_name}'"
+                    )
+                
+                if not post_merge_exists:
+                    setup_steps.append({
+                        "step": 4,
+                        "action": "Install post-merge hook",
+                        "reason": "Sync documentation from git worktrees back to main",
+                        "command": f"install_post_merge_hook('{project_name}')"
+                    })
+                    recommended_commands.append(
+                        f"Use code-query MCP to install post-merge hook for '{project_name}'"
+                    )
+            
+            # Build response
+            response = {
+                "success": True,
+                "project_name": project_name,
+                "source_directory": source_directory,
+                "current_state": {
+                    "config_exists": config_exists,
+                    "git_repository": git_exists,
+                    "has_datasets": has_datasets,
+                    "dataset_count": len(existing_datasets.get("datasets", []))
+                },
+                "setup_needed": len(setup_steps) > 0,
+                "setup_steps": setup_steps
+            }
+            
+            if recommended_commands:
+                response["recommendation"] = (
+                    f"To complete the Code Query MCP setup for '{project_name}', "
+                    f"I recommend running these {len(recommended_commands)} commands:\n\n" +
+                    "\n".join(f"{i+1}. {cmd}" for i, cmd in enumerate(recommended_commands)) +
+                    "\n\nWould you like me to run all these setup commands now?"
+                )
+                response["commands_to_run"] = recommended_commands
+            else:
+                response["recommendation"] = (
+                    "Your project is already fully set up with Code Query MCP! "
+                    "You can start using the search and documentation features."
+                )
+            
+            return response
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error analyzing setup requirements: {str(e)}"
+            }
 
 
 # Initialize server
@@ -1375,6 +1514,24 @@ async def list_tools() -> List[Tool]:
                     }
                 },
                 "required": ["dataset_name", "directory"]
+            }
+        ),
+        Tool(
+            name="recommend_setup",
+            description="Get setup recommendations for Code Query MCP. This analyzes your project and recommends the necessary setup steps including data import, configuration, and git hooks. Use this when starting with a new project.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_name": {
+                        "type": "string",
+                        "description": "Name for the project (auto-detected if not provided)"
+                    },
+                    "source_directory": {
+                        "type": "string",
+                        "description": "Directory to document (auto-detected if not provided)"
+                    }
+                },
+                "required": []
             }
         ),
         Tool(
@@ -1705,6 +1862,12 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         directory = arguments.get("directory", "")
         replace = arguments.get("replace", False)
         result = query_server.import_data(dataset_name, directory, replace)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
+    elif name == "recommend_setup":
+        project_name = arguments.get("project_name")
+        source_directory = arguments.get("source_directory")
+        result = query_server.recommend_setup(project_name, source_directory)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
     elif name == "search_files":

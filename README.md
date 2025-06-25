@@ -17,6 +17,32 @@ A Model Context Protocol (MCP) server for searching and querying code review JSO
    "Use the code-query MCP to search for 'authentication' in my_project"
    ```
 
+## Quick Project Setup (Recommended)
+
+For new projects, use the setup recommendation tool to get started quickly:
+
+```
+"Use code-query MCP to recommend setup"
+```
+
+This will:
+1. **Analyze your project** - Detect git repository, existing datasets, and project structure
+2. **Recommend setup steps** - Suggest the exact commands needed for your project
+3. **Guide the process** - Show what needs to be done and why
+
+Example response:
+```
+To complete the Code Query MCP setup for 'my-awesome-project', I recommend running these 3 commands:
+
+1. Use code-query MCP to document directory 'src' as 'my-awesome-project'
+2. Use code-query MCP to create project config for 'my-awesome-project'
+3. Use code-query MCP to install pre-commit hook for 'my-awesome-project'
+
+Would you like me to run all these setup commands now?
+```
+
+Simply say "yes" and Claude will execute all the setup steps automatically!
+
 ## Features
 
 - **Dynamic Data Loading**: Import JSON files during conversation, not at startup
@@ -284,6 +310,7 @@ Generate orchestration instructions for documenting a codebase:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
+| `recommend_setup` | Get setup recommendations for new projects | `project_name?`, `source_directory?` |
 | `import_data` | Import JSON files from directory | `dataset_name`, `directory`, `replace?` |
 | `search_files` | Search within dataset | `query`, `dataset_name`, `limit?` |
 | `get_file` | Get full file details (supports partial matching) | `filepath`, `dataset_name`, `limit?` |
