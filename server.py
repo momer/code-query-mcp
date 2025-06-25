@@ -13,6 +13,7 @@ import sqlite3
 import glob
 import logging
 import fnmatch
+import subprocess
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from mcp.server import Server
@@ -1101,28 +1102,194 @@ Focus on being concise but comprehensive. Identify the core purpose and key elem
             }
     
     def get_project_config(self) -> Dict[str, Any]:
-        """Get project configuration from .code-query/config.json."""
+        """Get comprehensive project configuration including git hooks status."""
+        result = {
+            "success": True,
+            "project_root": self.cwd,
+            "config_exists": False,
+            "config": None,
+            "git_hooks": {
+                "pre_commit": {
+                    "installed": False,
+                    "is_code_query": False,
+                    "path": None
+                },
+                "post_merge": {
+                    "installed": False,
+                    "is_code_query": False,
+                    "path": None
+                }
+            },
+            "datasets": [],
+            "worktree_info": None
+        }
+        
+        # Check configuration file
         config_path = os.path.join(self.cwd, ".code-query", "config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                result["config_exists"] = True
+                result["config"] = config
+            except (IOError, OSError, json.JSONDecodeError) as e:
+                result["config_error"] = f"Error reading configuration: {str(e)}"
+                logging.warning(f"Could not read config file: {e}")
         
-        if not os.path.exists(config_path):
-            return {
-                "success": False,
-                "message": "No project configuration found. Use install_pre_commit_hook to set up."
-            }
-        
-        try:
-            with open(config_path, 'r') as f:
-                config = json.load(f)
+        # Check git repository status
+        git_dir = os.path.join(self.cwd, ".git")
+        if os.path.exists(git_dir):
+            result["git_repository"] = True
             
-            return {
-                "success": True,
-                "config": config
-            }
+            # Check for git hooks
+            hooks_dir = os.path.join(git_dir, "hooks")
+            
+            # Check pre-commit hook
+            pre_commit_path = os.path.join(hooks_dir, "pre-commit")
+            if os.path.exists(pre_commit_path):
+                result["git_hooks"]["pre_commit"]["installed"] = True
+                result["git_hooks"]["pre_commit"]["path"] = pre_commit_path
+                try:
+                    with open(pre_commit_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        if "Code Query MCP Pre-commit Hook" in content:
+                            result["git_hooks"]["pre_commit"]["is_code_query"] = True
+                except (IOError, OSError) as e:
+                    logging.warning(f"Could not read pre-commit hook file: {e}")
+            
+            # Check post-merge hook
+            post_merge_path = os.path.join(hooks_dir, "post-merge")
+            if os.path.exists(post_merge_path):
+                result["git_hooks"]["post_merge"]["installed"] = True
+                result["git_hooks"]["post_merge"]["path"] = post_merge_path
+                try:
+                    with open(post_merge_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        if "Code Query MCP Post-merge Hook" in content:
+                            result["git_hooks"]["post_merge"]["is_code_query"] = True
+                except (IOError, OSError) as e:
+                    logging.warning(f"Could not read post-merge hook file: {e}")
+            
+            # Check if we're in a worktree
+            try:
+                # Get git directory path
+                git_dir_result = subprocess.run(
+                    ["git", "rev-parse", "--git-dir"],
+                    cwd=self.cwd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=10
+                )
+                git_dir_path = git_dir_result.stdout.strip()
+                
+                # Check if this is a worktree (path contains .git/worktrees/)
+                if ".git/worktrees/" in git_dir_path:
+                    # Extract worktree name from path
+                    worktree_name = os.path.basename(git_dir_path)
+                    
+                    # Get current branch name
+                    branch_result = subprocess.run(
+                        ["git", "branch", "--show-current"],
+                        cwd=self.cwd,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                        timeout=10
+                    )
+                    branch_name = branch_result.stdout.strip()
+                    
+                    result["worktree_info"] = {
+                        "is_worktree": True,
+                        "branch": branch_name,
+                        "worktree_name": worktree_name,
+                        "worktree_dataset_name": None
+                    }
+                    
+                    # Calculate worktree dataset name if config exists
+                    if result.get("config") and result["config"].get("datasetName"):
+                        base_dataset = result["config"]["datasetName"]
+                        # Use worktree directory name, matching shell scripts
+                        worktree_dataset = f"{base_dataset}-wt-{worktree_name}"
+                        result["worktree_info"]["worktree_dataset_name"] = worktree_dataset
+                        
+            except FileNotFoundError:
+                logging.warning("git command not found. Skipping worktree checks.")
+            except subprocess.CalledProcessError as e:
+                logging.warning(f"git command failed: {e}")
+                if e.stderr:
+                    logging.warning(f"git stderr: {e.stderr}")
+            except subprocess.TimeoutExpired:
+                logging.warning("git command timed out")
+            except OSError as e:
+                logging.warning(f"OS error running git command: {e}")
+        else:
+            result["git_repository"] = False
+        
+        # Get dataset information
+        try:
+            datasets_list = self.list_datasets()
+            # FIX: list_datasets returns a list, not a dict
+            if datasets_list:
+                result["datasets"] = datasets_list
+                
+                # Check if configured dataset exists
+                if result.get("config") and result["config"].get("datasetName"):
+                    dataset_name = result["config"]["datasetName"]
+                    dataset_exists = any(d["name"] == dataset_name for d in result["datasets"])
+                    result["configured_dataset_exists"] = dataset_exists
+                    
+                    # Check if worktree dataset exists
+                    if result.get("worktree_info") and result["worktree_info"].get("worktree_dataset_name"):
+                        worktree_dataset_name = result["worktree_info"]["worktree_dataset_name"]
+                        worktree_dataset_exists = any(d["name"] == worktree_dataset_name for d in result["datasets"])
+                        result["worktree_info"]["dataset_exists"] = worktree_dataset_exists
         except Exception as e:
-            return {
-                "success": False,
-                "message": f"Error reading configuration: {str(e)}"
+            logging.warning(f"Could not retrieve dataset information: {e}")
+        
+        # Check for other code-query files
+        code_query_dir = os.path.join(self.cwd, ".code-query")
+        if os.path.exists(code_query_dir):
+            result["code_query_files"] = {
+                "git_doc_update": os.path.exists(os.path.join(code_query_dir, "git-doc-update")),
+                "update_queue": os.path.exists(os.path.join(code_query_dir, "update_queue.txt")),
+                "gitignore": os.path.exists(os.path.join(code_query_dir, ".gitignore"))
             }
+            
+            # Check update queue status
+            queue_file = os.path.join(code_query_dir, "update_queue.txt")
+            if os.path.exists(queue_file):
+                try:
+                    with open(queue_file, 'r') as f:
+                        queued_files = [line.strip() for line in f if line.strip()]
+                    result["update_queue_count"] = len(queued_files)
+                except (IOError, OSError) as e:
+                    logging.warning(f"Could not read update queue file: {e}")
+        
+        # Generate setup recommendations
+        setup_complete = (
+            result.get("config_exists", False) and
+            result.get("git_hooks", {}).get("pre_commit", {}).get("is_code_query", False) and
+            result.get("configured_dataset_exists", False)
+        )
+        
+        result["setup_complete"] = setup_complete
+        
+        if not setup_complete:
+            recommendations = []
+            
+            if not result.get("configured_dataset_exists", False):
+                recommendations.append("Document your codebase or import existing data")
+            
+            if not result.get("config_exists", False):
+                recommendations.append("Create project configuration with create_project_config")
+            
+            if result.get("git_repository", False) and not result.get("git_hooks", {}).get("pre_commit", {}).get("is_code_query", False):
+                recommendations.append("Install pre-commit hook for automatic documentation updates")
+            
+            result["setup_recommendations"] = recommendations
+        
+        return result
     
     def create_project_config(self, dataset_name: str, exclude_patterns: List[str] = None) -> Dict[str, Any]:
         """Create or update project configuration file."""
@@ -2132,7 +2299,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="get_project_config",
-            description="Get current project configuration from .code-query/config.json",
+            description="Get comprehensive project configuration including dataset status, git hooks, and setup completeness. This tool helps understand what setup steps have been completed and what remains to be done.",
             inputSchema={
                 "type": "object",
                 "properties": {}
