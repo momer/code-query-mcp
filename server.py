@@ -1991,6 +1991,24 @@ exit 0
             existing_datasets = self.list_datasets()
             has_datasets = len(existing_datasets) > 0
             
+            # Try to determine the dataset name from existing configuration
+            dataset_name_to_use = None
+            config_data = None
+            
+            # First priority: check config file for dataset name
+            if config_exists:
+                try:
+                    with open(os.path.join(self.cwd, ".code-query", "config.json"), 'r') as f:
+                        config_data = json.load(f)
+                        if config_data.get("datasetName"):
+                            dataset_name_to_use = config_data["datasetName"]
+                except Exception:
+                    pass
+            
+            # Second priority: if we have existing datasets and no config, use the first one
+            if not dataset_name_to_use and has_datasets and len(existing_datasets) > 0:
+                dataset_name_to_use = existing_datasets[0]["name"]
+            
             # Generate project name suggestion if not provided
             if not project_name:
                 # Try to get from git remote or directory name
@@ -2009,6 +2027,9 @@ exit 0
                                 project_name = repo_name
                     except:
                         pass
+            
+            # Use discovered dataset name or fall back to project name
+            final_dataset_name = dataset_name_to_use or project_name
             
             # Default source directory
             if not source_directory:
@@ -2040,7 +2061,8 @@ exit 0
                     "step": 1,
                     "action": "Use existing dataset",
                     "reason": f"Found {len(existing_datasets)} existing dataset(s)",
-                    "datasets": existing_datasets
+                    "datasets": existing_datasets,
+                    "selected_dataset": dataset_name_to_use
                 })
             
             # Step 2: Create configuration
@@ -2049,10 +2071,10 @@ exit 0
                     "step": 2,
                     "action": "Create project configuration",
                     "reason": "No .code-query/config.json found",
-                    "command": f"create_project_config('{project_name}')"
+                    "command": f"create_project_config('{final_dataset_name}')"
                 })
                 recommended_commands.append(
-                    f"Use code-query MCP to create project config for '{project_name}'"
+                    f"Use code-query MCP to create project config for '{final_dataset_name}'"
                 )
             
             # Step 3: Install git hooks
@@ -2066,10 +2088,10 @@ exit 0
                         "step": 3,
                         "action": "Install pre-commit hook",
                         "reason": "Automatically queue changed files for documentation updates",
-                        "command": f"install_pre_commit_hook('{project_name}')"
+                        "command": f"install_pre_commit_hook('{final_dataset_name}')"
                     })
                     recommended_commands.append(
-                        f"Use code-query MCP to install pre-commit hook for '{project_name}'"
+                        f"Use code-query MCP to install pre-commit hook for '{final_dataset_name}'"
                     )
                 
                 if not post_merge_exists:
@@ -2077,22 +2099,25 @@ exit 0
                         "step": 4,
                         "action": "Install post-merge hook",
                         "reason": "Sync documentation from git worktrees back to main",
-                        "command": f"install_post_merge_hook('{project_name}')"
+                        "command": f"install_post_merge_hook('{final_dataset_name}')"
                     })
                     recommended_commands.append(
-                        f"Use code-query MCP to install post-merge hook for '{project_name}'"
+                        f"Use code-query MCP to install post-merge hook for '{final_dataset_name}'"
                     )
             
             # Build response
             response = {
                 "success": True,
                 "project_name": project_name,
+                "dataset_name": final_dataset_name,
                 "source_directory": source_directory,
                 "current_state": {
                     "config_exists": config_exists,
                     "git_repository": git_exists,
                     "has_datasets": has_datasets,
-                    "dataset_count": len(existing_datasets)
+                    "dataset_count": len(existing_datasets),
+                    "existing_datasets": existing_datasets if has_datasets else [],
+                    "config_dataset_name": config_data.get("datasetName") if config_data else None
                 },
                 "setup_needed": len(setup_steps) > 0,
                 "setup_steps": setup_steps
@@ -2105,7 +2130,7 @@ exit 0
                 
                 if required_commands and optional_commands:
                     response["recommendation"] = (
-                        f"To complete the Code Query MCP setup for '{project_name}', "
+                        f"To complete the Code Query MCP setup for '{final_dataset_name}', "
                         f"here are the recommended steps:\n\n" +
                         "**Required:**\n" +
                         "\n".join(f"{i+1}. {cmd}" for i, cmd in enumerate(required_commands)) +
@@ -2115,19 +2140,31 @@ exit 0
                         "just the required ones, or handle them individually."
                     )
                 elif optional_commands and not required_commands:
+                    # Include info about existing dataset if config-based
+                    dataset_info = ""
+                    if dataset_name_to_use and config_data:
+                        dataset_info = f"\n\n💡 Using existing dataset '{dataset_name_to_use}' from your project configuration."
+                    
                     response["recommendation"] = (
-                        f"Your Code Query MCP setup for '{project_name}' is mostly complete! "
+                        f"Your Code Query MCP setup for '{final_dataset_name}' is mostly complete! "
                         f"The only missing components are optional git hooks:\n\n" +
                         "\n".join(f"{i+1}. {cmd}" for i, cmd in enumerate(optional_commands)) +
                         "\n\nThese git hooks are optional but recommended for automatic documentation updates. "
-                        "Would you like me to install them?"
+                        "Would you like me to install them?" +
+                        dataset_info
                     )
                 else:
+                    # Include info about existing dataset if config-based
+                    dataset_info = ""
+                    if dataset_name_to_use and config_data:
+                        dataset_info = f"\n\n💡 Using existing dataset '{dataset_name_to_use}' from your project configuration."
+                    
                     response["recommendation"] = (
-                        f"To complete the Code Query MCP setup for '{project_name}', "
+                        f"To complete the Code Query MCP setup for '{final_dataset_name}', "
                         f"I recommend running these {len(recommended_commands)} commands:\n\n" +
                         "\n".join(f"{i+1}. {cmd}" for i, cmd in enumerate(recommended_commands)) +
-                        "\n\nWould you like me to run these setup commands now?"
+                        "\n\nWould you like me to run these setup commands now?" +
+                        dataset_info
                     )
                 response["commands_to_run"] = recommended_commands
             else:
