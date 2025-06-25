@@ -59,6 +59,31 @@ class CodeQueryServer:
             self._migrate_schema()
             logging.info(f"Connected to existing database at {DB_PATH}")
     
+    def _get_actual_git_dir(self) -> Optional[str]:
+        """Determines the actual .git directory path, handling worktrees."""
+        try:
+            git_dir_result = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=self.cwd,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10
+            )
+            git_dir_path = git_dir_result.stdout.strip()
+            if not os.path.isabs(git_dir_path):
+                git_dir_path = os.path.join(self.cwd, git_dir_path)
+            return os.path.abspath(git_dir_path)
+        except FileNotFoundError:
+            logging.error("git command not found. Please ensure Git is installed and in your PATH.")
+            return None
+        except subprocess.CalledProcessError as e:
+            logging.error(f"git command failed: {e.cmd} returned {e.returncode}. Stderr: {e.stderr.strip()}")
+            return None
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logging.error(f"Error running git command: {e}")
+            return None
+    
     def _create_schema(self):
         """Create database schema with dataset support and FTS5."""
         # Main files table with dataset_id
@@ -1137,12 +1162,12 @@ Focus on being concise but comprehensive. Identify the core purpose and key elem
                 logging.warning(f"Could not read config file: {e}")
         
         # Check git repository status
-        git_dir = os.path.join(self.cwd, ".git")
-        if os.path.exists(git_dir):
+        actual_git_dir = self._get_actual_git_dir()
+        if actual_git_dir:
             result["git_repository"] = True
             
             # Check for git hooks
-            hooks_dir = os.path.join(git_dir, "hooks")
+            hooks_dir = os.path.join(actual_git_dir, "hooks")
             
             # Check pre-commit hook
             pre_commit_path = os.path.join(hooks_dir, "pre-commit")
@@ -1171,22 +1196,12 @@ Focus on being concise but comprehensive. Identify the core purpose and key elem
                     logging.warning(f"Could not read post-merge hook file: {e}")
             
             # Check if we're in a worktree
-            try:
-                # Get git directory path
-                git_dir_result = subprocess.run(
-                    ["git", "rev-parse", "--git-dir"],
-                    cwd=self.cwd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=10
-                )
-                git_dir_path = git_dir_result.stdout.strip()
+            # The actual_git_dir already contains the path we need
+            if ".git/worktrees/" in actual_git_dir:
+                # Extract worktree name from path
+                worktree_name = os.path.basename(actual_git_dir)
                 
-                # Check if this is a worktree (path contains .git/worktrees/)
-                if ".git/worktrees/" in git_dir_path:
-                    # Extract worktree name from path
-                    worktree_name = os.path.basename(git_dir_path)
+                try:
                     
                     # Get current branch name
                     branch_result = subprocess.run(
@@ -1426,12 +1441,32 @@ Focus on being concise but comprehensive. Identify the core purpose and key elem
     def install_pre_commit_hook(self, dataset_name: str, mode: str = "queue") -> Dict[str, Any]:
         """Install pre-commit hook for automatic documentation updates."""
         try:
-            # Check if we're in a git repository
-            git_dir = os.path.join(self.cwd, ".git")
-            if not os.path.exists(git_dir):
+            # Check if jq is installed
+            try:
+                subprocess.run(["jq", "--version"], capture_output=True, check=True, timeout=5)
+            except (FileNotFoundError, subprocess.CalledProcessError):
                 return {
                     "success": False,
-                    "message": "Not in a git repository. Please run this from the root of your git project."
+                    "message": "The 'jq' command-line JSON processor is required but not installed.",
+                    "install_instructions": {
+                        "macOS": "brew install jq",
+                        "Ubuntu/Debian": "sudo apt-get install jq",
+                        "RHEL/CentOS": "sudo yum install jq",
+                        "Windows": "winget install stedolan.jq",
+                        "manual": "Visit https://stedolan.github.io/jq/download/"
+                    },
+                    "next_steps": [
+                        "Install jq using one of the commands above",
+                        "Then re-run this command to install the pre-commit hook"
+                    ]
+                }
+            
+            # Check if we're in a git repository
+            actual_git_dir = self._get_actual_git_dir()
+            if not actual_git_dir:
+                return {
+                    "success": False,
+                    "message": "Could not determine git repository directory. Ensure you are in a git repository and git is installed."
                 }
             
             # Create .code-query directory
@@ -1473,7 +1508,7 @@ get_dataset_name() {
     # Check if this is a worktree (not the main git dir)
     if [[ "$GIT_DIR" == *".git/worktrees/"* ]]; then
         # Extract worktree name from path
-        WORKTREE_NAME=$(echo "$GIT_DIR" | sed 's/.*\\.git\\/worktrees\\/\\([^\\/]*\\).*/\\1/')
+        WORKTREE_NAME=$(basename "$GIT_DIR")
         echo "${base_dataset}-wt-${WORKTREE_NAME}"
     else
         echo "$base_dataset"
@@ -1509,21 +1544,45 @@ if [ -z "$STAGED_FILES" ]; then
     exit 0
 fi
 
+# Read exclude patterns from config
+mapfile -t EXCLUDE_PATTERNS < <(jq -r '.excludePatterns[]?' "$CONFIG_FILE" 2>/dev/null)
+
 # Create queue file if it doesn't exist
 touch "$QUEUE_FILE"
 
-# Append staged files to queue (avoid duplicates)
+# Filter and append staged files to queue
+QUEUED_COUNT=0
 echo "$STAGED_FILES" | while IFS= read -r file; do
-    if [ -n "$file" ] && ! grep -Fxq "$file" "$QUEUE_FILE"; then
+    if [ -z "$file" ]; then
+        continue
+    fi
+    
+    # Check if file matches any exclude pattern
+    is_excluded=false
+    for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+        # Use case for shell glob matching
+        case "$file" in
+            $pattern)
+                is_excluded=true
+                break
+                ;;
+        esac
+    done
+    
+    # Queue file if not excluded and not already in queue
+    if [ "$is_excluded" = false ] && ! grep -Fxq "$file" "$QUEUE_FILE"; then
         echo "$file" >> "$QUEUE_FILE"
+        ((QUEUED_COUNT++))
     fi
 done
 
-# Count queued files
+# Count total queued files
 QUEUE_COUNT=$(wc -l < "$QUEUE_FILE" | tr -d ' ')
 
-echo "📄 Code Query: $QUEUE_COUNT file(s) queued for documentation update."
-echo "   Run '.code-query/git-doc-update' when ready to update documentation."
+if [ "$QUEUE_COUNT" -gt 0 ]; then
+    echo "📄 Code Query: $QUEUE_COUNT file(s) queued for documentation update."
+    echo "   Run '.code-query/git-doc-update' when ready to update documentation."
+fi
 
 exit 0
 """
@@ -1556,7 +1615,7 @@ get_dataset_name() {
     # Check if this is a worktree (not the main git dir)
     if [[ "$GIT_DIR" == *".git/worktrees/"* ]]; then
         # Extract worktree name from path
-        WORKTREE_NAME=$(echo "$GIT_DIR" | sed 's/.*\\.git\\/worktrees\\/\\([^\\/]*\\).*/\\1/')
+        WORKTREE_NAME=$(basename "$GIT_DIR")
         echo "${base_dataset}-wt-${WORKTREE_NAME}"
     else
         echo "$base_dataset"
@@ -1670,7 +1729,9 @@ fi
 """
             
             # Write pre-commit hook
-            hook_path = os.path.join(git_dir, "hooks", "pre-commit")
+            hooks_dir = os.path.join(actual_git_dir, "hooks")
+            os.makedirs(hooks_dir, exist_ok=True)  # Ensure hooks directory exists
+            hook_path = os.path.join(hooks_dir, "pre-commit")
             
             # Check if hook already exists
             if os.path.exists(hook_path):
@@ -1729,12 +1790,32 @@ fi
     def install_post_merge_hook(self, main_dataset: str = None) -> Dict[str, Any]:
         """Install post-merge hook for syncing worktree changes back to main dataset."""
         try:
-            # Check if we're in a git repository
-            git_dir = os.path.join(self.cwd, ".git")
-            if not os.path.exists(git_dir):
+            # Check if jq is installed
+            try:
+                subprocess.run(["jq", "--version"], capture_output=True, check=True, timeout=5)
+            except (FileNotFoundError, subprocess.CalledProcessError):
                 return {
                     "success": False,
-                    "message": "Not in a git repository. Please run this from the root of your git project."
+                    "message": "The 'jq' command-line JSON processor is required but not installed.",
+                    "install_instructions": {
+                        "macOS": "brew install jq",
+                        "Ubuntu/Debian": "sudo apt-get install jq",
+                        "RHEL/CentOS": "sudo yum install jq",
+                        "Windows": "winget install stedolan.jq",
+                        "manual": "Visit https://stedolan.github.io/jq/download/"
+                    },
+                    "next_steps": [
+                        "Install jq using one of the commands above",
+                        "Then re-run this command to install the post-merge hook"
+                    ]
+                }
+            
+            # Check if we're in a git repository
+            actual_git_dir = self._get_actual_git_dir()
+            if not actual_git_dir:
+                return {
+                    "success": False,
+                    "message": "Could not determine git repository directory. Ensure you are in a git repository and git is installed."
                 }
             
             # Read config to get main dataset name if not provided
@@ -1773,7 +1854,7 @@ get_dataset_name() {{
     # Check if this is a worktree (not the main git dir)
     if [[ "$GIT_DIR" == *".git/worktrees/"* ]]; then
         # Extract worktree name from path
-        WORKTREE_NAME=$(echo "$GIT_DIR" | sed 's/.*\\.git\\/worktrees\\/\\([^\\/]*\\).*/\\1/')
+        WORKTREE_NAME=$(basename "$GIT_DIR")
         echo "${{base_dataset}}-wt-${{WORKTREE_NAME}}"
     else
         echo "$base_dataset"
@@ -1800,9 +1881,23 @@ if [ "$CURRENT_DATASET" = "$BASE_DATASET" ]; then
 fi
 
 # Check if we just merged from main branch
+# First, try to get the main worktree's branch
+MAIN_BRANCH=$(git worktree list --porcelain | grep -A 1 "worktree .*[^/]$" | grep "branch" | head -n1 | sed 's/branch refs\/heads\///')
+if [ -z "$MAIN_BRANCH" ]; then
+    # Fallback to common main branch names
+    if git show-ref --verify --quiet refs/heads/main; then
+        MAIN_BRANCH="main"
+    elif git show-ref --verify --quiet refs/heads/master; then
+        MAIN_BRANCH="master"
+    else
+        MAIN_BRANCH="main"  # Default assumption
+    fi
+fi
+
+# Check if we just merged from the main branch
 MERGED_FROM=$(git reflog -1 | grep -o "merge [^:]*" | cut -d' ' -f2)
-if [[ "$MERGED_FROM" == *"main"* ]] || [[ "$MERGED_FROM" == *"master"* ]]; then
-    echo "📄 Code Query: Detected merge from main branch"
+if [[ "$MERGED_FROM" == *"$MAIN_BRANCH"* ]]; then
+    echo "📄 Code Query: Detected merge from main branch ($MAIN_BRANCH)"
     echo "   Syncing documentation from worktree dataset '$CURRENT_DATASET' to main dataset '$MAIN_DATASET'"
     
     # Get list of changed files in the merge
@@ -1831,7 +1926,9 @@ exit 0
 """
             
             # Write post-merge hook
-            hook_path = os.path.join(git_dir, "hooks", "post-merge")
+            hooks_dir = os.path.join(actual_git_dir, "hooks")
+            os.makedirs(hooks_dir, exist_ok=True)  # Ensure hooks directory exists
+            hook_path = os.path.join(hooks_dir, "post-merge")
             
             # Check if hook already exists
             if os.path.exists(hook_path):
@@ -1874,7 +1971,8 @@ exit 0
         try:
             # Check current state
             config_exists = os.path.exists(os.path.join(self.cwd, ".code-query", "config.json"))
-            git_exists = os.path.exists(os.path.join(self.cwd, ".git"))
+            actual_git_dir = self._get_actual_git_dir()
+            git_exists = actual_git_dir is not None
             
             # Check if any datasets exist
             existing_datasets = self.list_datasets()
@@ -1946,8 +2044,9 @@ exit 0
             
             # Step 3: Install git hooks
             if git_exists:
-                pre_commit_exists = os.path.exists(os.path.join(self.cwd, ".git", "hooks", "pre-commit"))
-                post_merge_exists = os.path.exists(os.path.join(self.cwd, ".git", "hooks", "post-merge"))
+                hooks_dir = os.path.join(actual_git_dir, "hooks")
+                pre_commit_exists = os.path.exists(os.path.join(hooks_dir, "pre-commit"))
+                post_merge_exists = os.path.exists(os.path.join(hooks_dir, "post-merge"))
                 
                 if not pre_commit_exists:
                     setup_steps.append({

@@ -60,6 +60,40 @@ Simply say "yes" and Claude will execute all the setup steps automatically!
 - Python 3.11 or higher
 - pip package manager
 - SQLite 3.9.0 or higher (for FTS5 support)
+- jq (command-line JSON processor) - Required for git hooks
+
+### Installing jq (Required for Git Hooks)
+
+The `jq` command-line JSON processor is required for the git pre-commit and post-merge hooks:
+
+**macOS:**
+```bash
+brew install jq
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install jq
+```
+
+**RHEL/CentOS/Fedora:**
+```bash
+sudo yum install jq
+# or
+sudo dnf install jq
+```
+
+**Windows:**
+```bash
+winget install stedolan.jq
+# or download from https://stedolan.github.io/jq/download/
+```
+
+**Verify installation:**
+```bash
+jq --version
+# Should output: jq-1.6 or similar
+```
 
 ### SQLite Extensions (Optional but Recommended)
 
@@ -567,6 +601,9 @@ cd /path/to/another/project
 The MCP includes a git pre-commit hook system that automatically queues changed files for documentation updates.
 
 ### Installation
+
+**Prerequisites:**
+- Ensure `jq` is installed (see [Installing jq](#installing-jq-required-for-git-hooks) section above)
 
 **Ask Claude:**
 ```
