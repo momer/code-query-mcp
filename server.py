@@ -413,7 +413,7 @@ async def list_tools() -> List[Tool]:
                 "required": ["query", "dataset_name"]
             }
         ),
-        types.Tool(
+        Tool(
             name="get_file",
             description="Get complete details for a specific file",
             inputSchema={
@@ -431,7 +431,7 @@ async def list_tools() -> List[Tool]:
                 "required": ["filepath", "dataset_name"]
             }
         ),
-        types.Tool(
+        Tool(
             name="list_domains",
             description="List all unique DDD context domains in dataset",
             inputSchema={
@@ -445,7 +445,7 @@ async def list_tools() -> List[Tool]:
                 "required": ["dataset_name"]
             }
         ),
-        types.Tool(
+        Tool(
             name="list_datasets",
             description="List all loaded datasets",
             inputSchema={
@@ -453,7 +453,7 @@ async def list_tools() -> List[Tool]:
                 "properties": {}
             }
         ),
-        types.Tool(
+        Tool(
             name="get_status",
             description="Get current database status",
             inputSchema={
@@ -461,7 +461,7 @@ async def list_tools() -> List[Tool]:
                 "properties": {}
             }
         ),
-        types.Tool(
+        Tool(
             name="clear_dataset",
             description="Clear a specific dataset",
             inputSchema={

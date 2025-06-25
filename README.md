@@ -2,6 +2,21 @@
 
 A Model Context Protocol (MCP) server for searching and querying code review JSON files. This server provides RAG-like capabilities to efficiently search through large codebases without loading all data into context.
 
+## Quick Start
+
+1. Install the MCP server:
+   ```bash
+   claude mcp add code-query -s user -- python ~/mcp-servers/code-query-mcp/server.py
+   ```
+
+2. Restart Claude
+
+3. Ask Claude to use the MCP:
+   ```
+   "Use the code-query MCP to import data from 'tmp/index' directory as 'my_project'"
+   "Use the code-query MCP to search for 'authentication' in my_project"
+   ```
+
 ## Features
 
 - **Dynamic Data Loading**: Import JSON files during conversation, not at startup
@@ -34,10 +49,12 @@ A Model Context Protocol (MCP) server for searching and querying code review JSO
    pip install -r requirements.txt
    ```
 
-2. Add the MCP server to Claude Code:
+2. Add the MCP server to Claude Code (use absolute path):
    ```bash
    claude mcp add code-query -s user -- python ~/mcp-servers/code-query-mcp/server.py
    ```
+   
+   **Note**: The path to `server.py` must be absolute. The `~` expands to your home directory.
 
 3. Verify installation:
    ```bash
@@ -78,55 +95,98 @@ A Model Context Protocol (MCP) server for searching and querying code review JSO
 
 ## Usage
 
-### 1. Import Your Data
+### Important: How to Use in Claude
 
-First, import your code review JSON files from your current working directory:
+After installing the MCP server, you need to ask Claude to use the code-query MCP tools. Here are two ways to do this:
+
+#### Method 1: Direct Request (Recommended)
+Simply ask Claude to use the specific tool:
 
 ```
-> import_data("my_project", "tmp/index")
-Result: {"success": true, "files_loaded": 135, "source": "tmp/index"}
+"Use the code-query MCP to import data from the 'tmp/index' directory as 'my_project'"
+"Use the code-query MCP to search for 'authentication' in the my_project dataset"
+"Use the code-query MCP to get details for src/auth/login.ts from my_project"
 ```
 
-You can also replace existing datasets:
+#### Method 2: Explicit Tool Names
+If Claude doesn't automatically recognize the request, you can be more explicit:
+
 ```
-> import_data("my_project", "tmp/index", true)
-Result: {"success": true, "files_loaded": 135, "source": "tmp/index", "message": "Replaced existing dataset"}
+"Call the mcp code-query import_data tool with dataset_name='my_project' and directory='tmp/index'"
+"Call the mcp code-query search_files tool with query='authentication' and dataset_name='my_project'"
 ```
 
-### 2. Search for Files
+### Tool Reference
+
+#### 1. Import Your Data
+
+Import your code review JSON files from your current working directory:
+
+**Ask Claude:**
+```
+"Use code-query MCP to import data from 'tmp/index' directory as 'claude-acorn-gui'"
+```
+
+**Tool call:** `import_data(dataset_name, directory, replace?)`
+- `dataset_name`: A unique name for your dataset
+- `directory`: Path to directory containing JSON files (relative to current directory)
+- `replace`: Optional boolean to replace existing dataset
+
+**Response:**
+```json
+{
+  "success": true,
+  "files_loaded": 135,
+  "source": "tmp/index"
+}
+```
+
+#### 2. Search for Files
 
 Search for files containing specific keywords:
 
+**Ask Claude:**
 ```
-> search_files("temperature", "my_project", 10)
-Returns: [
+"Use code-query MCP to search for 'temperature' in the claude-acorn-gui dataset"
+```
+
+**Tool call:** `search_files(query, dataset_name, limit?)`
+- `query`: Search term
+- `dataset_name`: Which dataset to search
+- `limit`: Optional max results (default: 10)
+
+**Response:**
+```json
+[
   {
     "filepath": "src/features/device-management/hooks/useTemperatureData.ts",
     "filename": "useTemperatureData.ts",
     "overview": "Hook for managing temperature sensor data",
     "ddd_context": "device-management"
-  },
-  ...
+  }
 ]
 ```
 
-### 3. Get File Details
+#### 3. Get File Details
 
 Get complete details for a specific file:
 
+**Ask Claude:**
 ```
-> get_file("src/features/device-management/hooks/useTemperatureData.ts", "my_project")
-Returns: {
-  "filepath": "src/features/device-management/hooks/useTemperatureData.ts",
-  "filename": "useTemperatureData.ts",
-  "overview": "Hook for managing temperature sensor data",
-  "functions": {
-    "useTemperatureData": {
-      "purpose": "Custom hook for temperature data management",
-      "parameters": ["sensorId: string"],
-      "returns": "TemperatureData"
-    }
-  },
+"Use code-query MCP to get details for src/auth/login.ts from claude-acorn-gui"
+```
+
+**Tool call:** `get_file(filepath, dataset_name)`
+- `filepath`: Full path to the file
+- `dataset_name`: Which dataset contains the file
+
+**Response:**
+```json
+{
+  "filepath": "src/features/auth/login.ts",
+  "filename": "login.ts",
+  "overview": "Authentication login component",
+  "functions": {...},
   "exports": {...},
   "imports": {...},
   "types_interfaces_classes": {...},
@@ -136,58 +196,49 @@ Returns: {
 }
 ```
 
-### 4. List Domains
+#### 4. List Domains
 
 See all DDD domains in your project:
 
+**Ask Claude:**
 ```
-> list_domains("my_project")
-Returns: ["device-management", "protocol-configuration", "run-management", ...]
+"Use code-query MCP to list all domains in claude-acorn-gui"
 ```
 
-### 5. List Datasets
+**Tool call:** `list_domains(dataset_name)`
+
+#### 5. List Datasets
 
 See all loaded datasets:
 
+**Ask Claude:**
 ```
-> list_datasets()
-Returns: [
-  {
-    "name": "my_project",
-    "source": "tmp/index",
-    "file_count": 135,
-    "loaded_at": "2024-01-20 10:30:00"
-  },
-  {
-    "name": "another_project",
-    "source": "data/reviews",
-    "file_count": 87,
-    "loaded_at": "2024-01-19 15:45:00"
-  }
-]
+"Use code-query MCP to list all datasets"
 ```
 
-### 6. Check Status
+**Tool call:** `list_datasets()`
+
+#### 6. Check Status
 
 See database status and statistics:
 
+**Ask Claude:**
 ```
-> get_status()
-Returns: {
-  "database_path": "/current/working/directory/.mcp_code_query/code_data.db",
-  "datasets": [...],
-  "total_files": 222
-}
+"Use code-query MCP to check status"
 ```
 
-### 7. Clear Dataset
+**Tool call:** `get_status()`
+
+#### 7. Clear Dataset
 
 Remove a dataset when no longer needed:
 
+**Ask Claude:**
 ```
-> clear_dataset("old_project")
-Returns: {"success": true, "message": "Cleared dataset 'old_project' with 87 files"}
+"Use code-query MCP to clear the old_project dataset"
 ```
+
+**Tool call:** `clear_dataset(dataset_name)`
 
 ## MCP Tools Reference
 
@@ -282,6 +333,20 @@ The server creates a `.mcp_code_query/` directory in your current working direct
 - Logging for debugging import issues
 
 ## Troubleshooting
+
+### Claude doesn't recognize the MCP commands
+If you try to use `import_data()` directly and Claude doesn't recognize it:
+1. **Restart Claude** after installing/updating the MCP server
+2. Use explicit requests like: "Use the code-query MCP to import data..."
+3. Check the MCP is installed: Run `claude mcp list` in terminal
+4. Verify the server has no errors: Check the MCP logs
+
+### MCP tools not appearing
+If the MCP tools aren't available in Claude:
+1. Ensure the server.py file has no syntax errors
+2. Check that all `Tool` imports are correct (not `types.Tool`)
+3. Restart Claude to reload the MCP server
+4. Try reinstalling the MCP: `claude mcp remove code-query` then add it again
 
 ### No JSON files found
 - Ensure your JSON files match the pattern `agent_*_review.json` or `*.json`
