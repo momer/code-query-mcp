@@ -309,6 +309,65 @@ async def main():
     else:
         logging.info("No active dataset configured. Tools will require explicit dataset names.")
     
+    if worktree_info:
+        # We're in a git repository
+        if worktree_info["is_worktree"]:
+            # This is a linked worktree - need to check main config
+            main_config_path = os.path.join(worktree_info["main_path"], ".code-query", "config.json")
+            
+            if os.path.exists(main_config_path):
+                try:
+                    with open(main_config_path, 'r') as f:
+                        main_config = json.load(f)
+                    
+                    # Support both old and new config schema
+                    main_dataset_name = main_config.get("mainDatasetName") or main_config.get("datasetName")
+                    
+                    if main_dataset_name:
+                        # Derive worktree dataset name - use cleaner naming without __wt_
+                        worktree_dataset_name = f"{main_dataset_name}_{worktree_info['sanitized_branch']}"
+                        
+                        # Check if worktree dataset exists
+                        existing_datasets = {d['name'] for d in query_server.list_datasets()}
+                        
+                        if worktree_dataset_name not in existing_datasets:
+                            logging.info(f"Creating worktree dataset '{worktree_dataset_name}' from '{main_dataset_name}'...")
+                            fork_result = query_server.fork_dataset(main_dataset_name, worktree_dataset_name)
+                            
+                            if not fork_result.get("success"):
+                                logging.error(f"Failed to fork dataset: {fork_result.get('message')}")
+                                logging.info(f"Falling back to main dataset '{main_dataset_name}'")
+                                active_dataset_name = main_dataset_name
+                            else:
+                                logging.info(f"Successfully created worktree dataset '{worktree_dataset_name}'")
+                                active_dataset_name = worktree_dataset_name
+                        else:
+                            logging.info(f"Using existing worktree dataset '{worktree_dataset_name}'")
+                            active_dataset_name = worktree_dataset_name
+                    else:
+                        logging.warning("No mainDatasetName found in main config. Please run setup on main branch first.")
+                except Exception as e:
+                    logging.error(f"Error reading main config: {e}")
+            else:
+                logging.warning("No config found in main worktree. Please run setup on main branch first.")
+        else:
+            # This is the main worktree - check local config
+            local_config_path = os.path.join(os.getcwd(), ".code-query", "config.json")
+            if os.path.exists(local_config_path):
+                try:
+                    with open(local_config_path, 'r') as f:
+                        config = json.load(f)
+                    active_dataset_name = config.get("mainDatasetName") or config.get("datasetName")
+                except Exception as e:
+                    logging.error(f"Error reading config: {e}")
+    
+    if active_dataset_name:
+        logging.info(f"Active dataset for this session: '{active_dataset_name}'")
+        # Store the active dataset name on the query_server for tool use
+        query_server.active_dataset = active_dataset_name
+    else:
+        logging.info("No active dataset configured. Tools will require explicit dataset names.")
+    
     # Run the server
     async with stdio_server() as (read_stream, write_stream):
         await server.run(

@@ -6,7 +6,7 @@ A Model Context Protocol (MCP) server for searching and querying code review JSO
 
 1. Install the MCP server:
    ```bash
-   claude mcp add code-query -s user -- python ~/mcp-servers/code-query-mcp/server.py
+   claude mcp add code-query -s user -- python ~/mcp-servers/code-query-mcp/run_server.py
    ```
 
 2. Restart Claude
@@ -147,10 +147,10 @@ The Code Query MCP uses advanced SQLite features that significantly improve sear
 
 2. Add the MCP server to Claude Code (use absolute path):
    ```bash
-   claude mcp add code-query -s user -- python ~/mcp-servers/code-query-mcp/server.py
+   claude mcp add code-query -s user -- python ~/mcp-servers/code-query-mcp/run_server.py
    ```
    
-   **Note**: The path to `server.py` must be absolute. The `~` expands to your home directory.
+   **Note**: Use `run_server.py` instead of `server.py` to ensure proper module imports. The path must be absolute. The `~` expands to your home directory.
 
 3. Verify installation:
    ```bash
@@ -181,7 +181,7 @@ The Code Query MCP uses advanced SQLite features that significantly improve sear
      "mcpServers": {
        "code-query": {
          "command": "python",
-         "args": ["/absolute/path/to/code-query-mcp/server.py"]
+         "args": ["/absolute/path/to/code-query-mcp/run_server.py"]
        }
      }
    }
