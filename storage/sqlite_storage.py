@@ -496,6 +496,12 @@ class CodeQueryServer:
         
         if cursor.fetchone():
             # Use FTS5 for search
+            # Escape special FTS5 characters by wrapping each term in quotes
+            # Split on spaces and quote each term to handle special characters
+            terms = query.split()
+            escaped_terms = [f'"{term}"' for term in terms]
+            fts_query = ' '.join(escaped_terms)
+            
             cursor = self.db.execute("""
                 SELECT DISTINCT f.filepath, f.filename, f.overview, f.ddd_context,
                        snippet(files_fts, 2, '[MATCH]', '[/MATCH]', '...', 64) as match_snippet
@@ -505,7 +511,7 @@ class CodeQueryServer:
                 AND f.dataset_id = ?
                 ORDER BY rank
                 LIMIT ?
-            """, (query, dataset_name, limit))
+            """, (fts_query, dataset_name, limit))
         else:
             # Fallback to LIKE search
             like_query = f"%{query}%"
