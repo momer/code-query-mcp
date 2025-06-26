@@ -1222,6 +1222,14 @@ Would you like me to provide the file batches for you to process?
                     "message": f"Installation script not found at {install_script}"
                 }
             
+            # Sanitize dataset_name to prevent shell injection in the script
+            import re
+            if not re.match(r'^[a-zA-Z0-9_.-]+$', dataset_name):
+                return {
+                    "success": False,
+                    "message": "Invalid dataset_name. Only alphanumeric characters, underscore, dot, and hyphen are allowed."
+                }
+            
             # Run the install script
             try:
                 result = subprocess.run(
@@ -1289,6 +1297,14 @@ Would you like me to provide the file batches for you to process?
                         "message": "No main dataset specified and couldn't find one in config."
                     }
             
+            # Validate main_dataset to prevent shell injection
+            import re
+            if not re.match(r'^[a-zA-Z0-9_.-]+$', main_dataset):
+                return {
+                    "success": False,
+                    "message": "Invalid main_dataset. Only alphanumeric characters, underscore, dot, and hyphen are allowed."
+                }
+            
             # Create post-merge hook script
             post_merge_hook = f"""#!/bin/bash
 # Code Query MCP Post-merge Hook
@@ -1316,7 +1332,8 @@ if [ -z "$CURRENT_DATASET" ]; then
 fi
 
 # Main dataset for this repository
-MAIN_DATASET="{main_dataset}"
+# Use single quotes to prevent shell expansion
+MAIN_DATASET='{main_dataset}'
 
 # Skip if we're already on the main dataset
 if [ "$CURRENT_DATASET" = "$MAIN_DATASET" ]; then
@@ -1399,46 +1416,61 @@ exit 0
             return {"success": False, "message": "Database not connected"}
         
         try:
-            # 1. Get changed files using git diff
+            # 1. Get changed files using git diff with status
             # Use target_ref...source_ref to find changes introduced by source
-            diff_command = ["git", "diff", "--name-only", f"{target_ref}...{source_ref}"]
+            # Add '--' to prevent argument injection
+            diff_command = ["git", "diff", "--name-status", f"{target_ref}...{source_ref}", "--"]
             result = subprocess.run(diff_command, capture_output=True, text=True, check=True, cwd=self.cwd)
-            changed_files = result.stdout.strip().split('\n')
+            changed_files_raw = result.stdout.strip().split('\n')
             
-            if not any(changed_files):
+            if not any(changed_files_raw):
                 return {"success": True, "message": "No changes to sync"}
             
             # 2. Sync in transaction for atomicity
             synced_count = 0
+            deleted_count = 0
             with self.db:  # Transaction context
-                for filepath in changed_files:
-                    if not filepath: 
+                for line in changed_files_raw:
+                    if not line: 
                         continue
-                        
-                    # 3. Fetch record from source dataset
-                    cursor = self.db.execute(
-                        "SELECT * FROM files WHERE dataset_id = ? AND filepath = ?",
-                        (source_dataset, filepath)
-                    )
-                    source_record = cursor.fetchone()
                     
-                    if source_record:
-                        # 4. Insert or replace in target dataset
-                        columns = [key for key in source_record.keys() if key != 'dataset_id']
-                        placeholders = ', '.join(['?'] * (len(columns) + 1))
-                        values = [target_dataset] + [source_record[col] for col in columns]
+                    parts = line.split('\t')
+                    if len(parts) < 2:
+                        continue
+                    status, filepath = parts[0], parts[1]
+                    
+                    if status.startswith('D'): # Deleted
+                        self.db.execute(
+                            "DELETE FROM files WHERE dataset_id = ? AND filepath = ?",
+                            (target_dataset, filepath)
+                        )
+                        deleted_count += 1
+                    else: # Added (A) or Modified (M)
+                        # 3. Fetch record from source dataset
+                        cursor = self.db.execute(
+                            "SELECT * FROM files WHERE dataset_id = ? AND filepath = ?",
+                            (source_dataset, filepath)
+                        )
+                        source_record = cursor.fetchone()
                         
-                        self.db.execute(f"""
-                            INSERT OR REPLACE INTO files (dataset_id, {', '.join(columns)})
-                            VALUES ({placeholders})
-                        """, tuple(values))
-                        synced_count += 1
+                        if source_record:
+                            # 4. Insert or replace in target dataset
+                            columns = [key for key in source_record.keys() if key != 'dataset_id']
+                            placeholders = ', '.join(['?'] * (len(columns) + 1))
+                            values = [target_dataset] + [source_record[col] for col in columns]
+                            
+                            self.db.execute(f"""
+                                INSERT OR REPLACE INTO files (dataset_id, {', '.join(columns)})
+                                VALUES ({placeholders})
+                            """, tuple(values))
+                            synced_count += 1
             
             return {
                 "success": True,
-                "message": f"Synced {synced_count} files from '{source_dataset}' to '{target_dataset}'",
-                "files_checked": len(changed_files),
-                "files_synced": synced_count
+                "message": f"Synced {synced_count} files and removed {deleted_count} files from '{target_dataset}'",
+                "files_checked": len(changed_files_raw),
+                "files_synced": synced_count,
+                "files_deleted": deleted_count
             }
             
         except subprocess.CalledProcessError as e:

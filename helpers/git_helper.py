@@ -140,16 +140,9 @@ def get_main_worktree_path(cwd: str = None) -> str | None:
         
         git_common_dir = result.stdout.strip()
         
-        # The main worktree is the parent of the .git directory
-        # Remove the /.git suffix to get the main worktree path
-        if git_common_dir.endswith("/.git"):
-            return git_common_dir[:-5]
-        elif git_common_dir.endswith("\\.git"):  # Windows
-            return git_common_dir[:-5]
-        else:
-            # Shouldn't happen with a properly configured repo
-            logging.warning(f"Unexpected git common dir format: {git_common_dir}")
-            return os.path.dirname(git_common_dir)
+        # The main worktree is the parent of the .git directory.
+        # This is more robust than string stripping.
+        return os.path.dirname(git_common_dir)
             
     except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
         logging.debug(f"Failed to get main worktree path: {e}")
