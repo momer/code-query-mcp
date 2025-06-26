@@ -1,3 +1,4 @@
 .mcp*
 data/
 __pycache__/
+tmp/
