@@ -393,6 +393,13 @@ class CodeQueryServer:
         if not self.db:
             return {"success": False, "message": "Database not connected"}
         
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return {
+                "success": False,
+                "message": "Invalid dataset_name. It cannot be '.' or '..', contain slashes, and must consist of alphanumeric characters, underscore, dot, or hyphen."
+            }
+        
         # Check if dataset already exists
         cursor = self.db.execute("""
             SELECT COUNT(*) as count FROM files WHERE dataset_id = ?
@@ -474,6 +481,10 @@ class CodeQueryServer:
         if not self.db:
             return []
         
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return []  # Return empty list for invalid dataset names
+        
         results = []
         
         # Check if FTS5 is available
@@ -533,6 +544,10 @@ class CodeQueryServer:
         if not self.db:
             return
         
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return
+        
         try:
             # Check if spellfix1 extension is available
             self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS spellfix_terms USING spellfix1")
@@ -546,13 +561,16 @@ class CodeQueryServer:
             """, (dataset_name,))
             
             vocabulary = set()
+            MAX_FIELD_LENGTH = 100_000  # Limit field length to prevent DoS
             
             for row in cursor:
                 # Extract words from each field
                 for field in ['filepath', 'filename', 'overview', 'ddd_context']:
                     if row[field]:
+                        # Truncate field to prevent DoS on large inputs
+                        content = row[field][:MAX_FIELD_LENGTH]
                         # Simple word extraction (could be improved)
-                        words = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', row[field])
+                        words = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', content)
                         vocabulary.update(word.lower() for word in words)
                 
                 # Extract from JSON fields
@@ -580,6 +598,10 @@ class CodeQueryServer:
     
     def rebuild_fts_index(self, dataset_name: str = None):
         """Rebuild FTS5 index for better performance after bulk operations."""
+        # Validate dataset name if provided
+        if dataset_name and not self._is_valid_dataset_name(dataset_name):
+            return {"success": False, "message": "Invalid dataset_name."}
+        
         try:
             # Check if FTS5 is available
             cursor = self.db.execute("""
@@ -612,6 +634,10 @@ class CodeQueryServer:
         if not self.db:
             return None
         
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return None
+        
         # If filepath doesn't contain wildcards, wrap with % for flexible matching
         if '%' not in filepath:
             # Try exact match first
@@ -635,6 +661,9 @@ class CodeQueryServer:
                 return result
             
             # No exact match, try partial matching
+            # Prevent overly broad searches that could cause performance issues
+            if len(filepath) < 3:
+                return None  # Query too broad for partial matching
             filepath = f'%{filepath}%'
         
         # Use LIKE query for partial matching
@@ -670,6 +699,10 @@ class CodeQueryServer:
     def list_domains(self, dataset_name: str) -> List[str]:
         """List unique DDD context domains in dataset."""
         if not self.db:
+            return []
+        
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
             return []
         
         cursor = self.db.execute("""
@@ -750,6 +783,13 @@ class CodeQueryServer:
         """Clear all data for a specific dataset."""
         if not self.db:
             return {"success": False, "message": "Database not connected"}
+        
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return {
+                "success": False,
+                "message": "Invalid dataset_name. It cannot be '.' or '..', contain slashes, and must consist of alphanumeric characters, underscore, dot, or hyphen."
+            }
         
         try:
             # Check if dataset exists
@@ -846,6 +886,13 @@ Would you like me to provide the file batches for you to process?
         if not self.db:
             return {"success": False, "message": "Database not connected"}
         
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return {
+                "success": False,
+                "message": "Invalid dataset_name. It cannot be '.' or '..', contain slashes, and must consist of alphanumeric characters, underscore, dot, or hyphen."
+            }
+        
         try:
             self.db.execute("""
                 INSERT OR REPLACE INTO files (
@@ -903,6 +950,13 @@ Would you like me to provide the file batches for you to process?
         """Update existing file documentation with only provided fields."""
         if not self.db:
             return {"success": False, "message": "Database not connected"}
+        
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return {
+                "success": False,
+                "message": "Invalid dataset_name. It cannot be '.' or '..', contain slashes, and must consist of alphanumeric characters, underscore, dot, or hyphen."
+            }
         
         # Check if file exists
         cursor = self.db.execute("""
@@ -1163,6 +1217,13 @@ Would you like me to provide the file batches for you to process?
         """Fork (copy) a dataset to a new name."""
         if not self.db:
             return {"success": False, "message": "Database not connected"}
+        
+        # Validate dataset names
+        if not self._is_valid_dataset_name(source_dataset) or not self._is_valid_dataset_name(target_dataset):
+            return {
+                "success": False,
+                "message": "Invalid source or target dataset_name. They cannot be '.' or '..', contain slashes, and must consist of alphanumeric characters, underscore, dot, or hyphen."
+            }
         
         try:
             # Check if source exists
@@ -1576,6 +1637,13 @@ exit 0
         ref_pattern = re.compile(r"^[a-zA-Z0-9_./-]+$")
         if not ref_pattern.match(source_ref) or not ref_pattern.match(target_ref):
             return {"success": False, "message": "Invalid ref format. Contains disallowed characters."}
+        
+        # Validate dataset names
+        if not self._is_valid_dataset_name(source_dataset) or not self._is_valid_dataset_name(target_dataset):
+            return {
+                "success": False,
+                "message": "Invalid source or target dataset_name. They cannot be '.' or '..', contain slashes, and must consist of alphanumeric characters, underscore, dot, or hyphen."
+            }
         
         try:
             # 1. Get changed files using git diff with status

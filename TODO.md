@@ -1,50 +1,24 @@
 # TODO - Security Fixes and Improvements
 
-## Critical Security Issues
+## ✅ Completed Security Fixes
 
-### 1. Argument Injection in sync_dataset (CRITICAL)
-**Location**: `storage/sqlite_storage.py:795` (sync_dataset function)
-**Issue**: The `source_ref` and `target_ref` parameters are used directly in a git diff command without validation. An attacker could provide a ref name that starts with a dash (e.g., `--output=/tmp/pwned`) which git would interpret as a command-line option.
-**Fix**: Add validation to ensure refs don't start with dash and only contain valid git ref characters:
-```python
-# Add validation for git refs to prevent argument injection
-ref_pattern = re.compile(r"^[a-zA-Z0-9_./-]+$")
-if not ref_pattern.match(source_ref) or not ref_pattern.match(target_ref):
-    return {"success": False, "message": "Invalid source or target ref format."}
-if source_ref.startswith('-') or target_ref.startswith('-'):
-    return {"success": False, "message": "Invalid source or target ref. Refs cannot start with a dash."}
-```
+### 1. ~~Argument Injection in sync_dataset~~ (COMPLETED)
+**Status**: Fixed in commit bb9bda5
+**Fix Applied**: Added validation at the start of sync_dataset() to check refs don't start with dash and only contain safe characters.
 
-### 2. Command Injection in post-merge hook (CRITICAL)
-**Location**: `storage/sqlite_storage.py:1070` (install_post_merge_hook function)
-**Issue**: The post-merge hook reads `CURRENT_DATASET` from config.json without validation. If an attacker modifies config.json, they could inject commands.
-**Fix**: Add validation inside the generated shell script:
-```bash
-# Validate the dataset name read from the config file
-if ! [[ "$CURRENT_DATASET" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
-    echo "⚠️  Code Query: Invalid dataset name found in config: $CURRENT_DATASET"
-    exit 0
-fi
-```
+### 2. ~~Command Injection in post-merge hook~~ (COMPLETED)
+**Status**: Fixed in commit bb9bda5
+**Fix Applied**: Post-merge hook now validates dataset names from config.json using regex before use.
 
-## High Priority Issues
+## ✅ Completed High Priority Issues
 
-### 3. Dataset name validation allows path traversal (HIGH)
-**Location**: `storage/sqlite_storage.py:919` and `1045`
-**Issue**: The regex `^[a-zA-Z0-9_.-]+$` allows dataset names like `.` or `..` which could lead to path traversal vulnerabilities.
-**Fix**: Explicitly disallow `.` and `..`:
-```python
-if not re.match(r'^[a-zA-Z0-9_.-]+$', dataset_name) or dataset_name in ('.', '..'):
-    return {
-        "success": False,
-        "message": "Invalid dataset_name. Only alphanumeric characters, underscore, dot, and hyphen are allowed, and it cannot be '.' or '..'."
-    }
-```
+### 3. ~~Dataset name validation allows path traversal~~ (COMPLETED)
+**Status**: Fixed in commit bb9bda5
+**Fix Applied**: Created centralized `_is_valid_dataset_name()` function that explicitly disallows `.` and `..` and path separators.
 
-### 4. Security of install_pre_commit_hook depends on external script (HIGH)
-**Location**: `storage/sqlite_storage.py:1070`
-**Issue**: The function executes `install-pre-commit-hook.sh` script. Security depends on how that script handles arguments.
-**Action**: Review and ensure the shell script properly quotes all arguments when using them in commands.
+### 4. ~~Security of install_pre_commit_hook depends on external script~~ (COMPLETED)
+**Status**: Fixed in commit bb9bda5
+**Fix Applied**: Removed dependency on external scripts by embedding hook logic directly in Python with proper validation.
 
 ## Medium Priority Issues
 
