@@ -1223,10 +1223,20 @@ Would you like me to provide the file batches for you to process?
             with open(config_path, 'w') as f:
                 json.dump(config_data, f, indent=2)
             
-            # Build response
+            # Build response with clear messaging about what happened
+            if wt_info and wt_info['is_worktree']:
+                if auto_fork_info:
+                    main_message = f"✅ Git worktree detected! Created isolated dataset '{actual_dataset_name}' for branch '{wt_info['branch']}' by copying {auto_fork_info['files']} files from main dataset '{auto_fork_info['from']}'."
+                else:
+                    main_message = f"✅ Git worktree detected! Created configuration for isolated dataset '{actual_dataset_name}' for branch '{wt_info['branch']}'."
+            else:
+                main_message = f"Created project configuration for dataset '{actual_dataset_name}'"
+                if auto_fork_info:
+                    main_message += f" (copied {auto_fork_info['files']} files from '{auto_fork_info['from']}')"
+            
             response = {
                 "success": True,
-                "message": f"Created project configuration for dataset '{actual_dataset_name}'",
+                "message": main_message,
                 "config_path": config_path,
                 "config": config_data
             }
@@ -1238,12 +1248,12 @@ Would you like me to provide the file batches for you to process?
                     "worktree_dataset": actual_dataset_name,
                     "main_dataset": main_dataset,
                     "branch": wt_info['branch'],
-                    "data_isolation": "All operations in this worktree will use the worktree-specific dataset"
+                    "data_isolation": "All operations in this worktree will use the worktree-specific dataset",
+                    "important": f"IMPORTANT: Your data was {'copied from' if auto_fork_info else 'will be isolated from'} the main dataset. Changes in this worktree will not affect the main dataset."
                 }
             
             if auto_fork_info:
                 response["auto_fork"] = auto_fork_info
-                response["message"] += f" (auto-forked {auto_fork_info['files']} files from '{auto_fork_info['from']}')"
             
             return response
             
@@ -2025,10 +2035,24 @@ exit 0
             
             # Add worktree information if applicable
             if wt_info and wt_info['is_worktree']:
+                # Check if main dataset exists to inform about data copying
+                main_dataset_exists = False
+                if has_datasets:
+                    for dataset in existing_datasets:
+                        if dataset["name"] == final_dataset_name:
+                            main_dataset_exists = True
+                            break
+                
+                wt_dataset_name = f"{final_dataset_name}__wt_{wt_info['sanitized_branch']}"
+                copy_note = ""
+                if main_dataset_exists:
+                    copy_note = f" Your existing dataset '{final_dataset_name}' will be COPIED to create the worktree dataset - no data will be lost."
+                
                 response["worktree_info"] = {
                     "detected": True,
                     "branch": wt_info['branch'],
-                    "note": f"Git worktree detected. Dataset will be automatically namespaced as '{final_dataset_name}__wt_{wt_info['sanitized_branch']}'"
+                    "note": f"🔄 Git worktree detected! A separate dataset '{wt_dataset_name}' will be created for this worktree.{copy_note}",
+                    "important": "IMPORTANT: This worktree will use an isolated copy of your data. Changes in this worktree will NOT affect your main dataset."
                 }
             
             if recommended_commands:
@@ -2037,7 +2061,12 @@ exit 0
                 optional_commands = [cmd for cmd in recommended_commands if "git hook" in cmd.lower()]
                 
                 if required_commands and optional_commands:
+                    worktree_warning = ""
+                    if wt_info and wt_info['is_worktree']:
+                        worktree_warning = "⚠️  **WORKTREE DETECTED**: This will create an ISOLATED copy of your data for this worktree. Your main dataset will remain unchanged.\n\n"
+                    
                     response["recommendation"] = (
+                        worktree_warning +
                         f"To complete the Code Query MCP setup for '{final_dataset_name}', "
                         f"here are the recommended steps:\n\n" +
                         "**Required:**\n" +
@@ -2053,7 +2082,12 @@ exit 0
                     if dataset_name_to_use and config_data:
                         dataset_info = f"\n\n💡 Using existing dataset '{dataset_name_to_use}' from your project configuration."
                     
+                    worktree_warning = ""
+                    if wt_info and wt_info['is_worktree']:
+                        worktree_warning = "⚠️  **WORKTREE DETECTED**: Your data will be isolated in this worktree.\n\n"
+                    
                     response["recommendation"] = (
+                        worktree_warning +
                         f"Your Code Query MCP setup for '{final_dataset_name}' is mostly complete! "
                         f"The only missing components are optional git hooks:\n\n" +
                         "\n".join(f"{i+1}. {cmd}" for i, cmd in enumerate(optional_commands)) +
@@ -2067,7 +2101,12 @@ exit 0
                     if dataset_name_to_use and config_data:
                         dataset_info = f"\n\n💡 Using existing dataset '{dataset_name_to_use}' from your project configuration."
                     
+                    worktree_warning = ""
+                    if wt_info and wt_info['is_worktree']:
+                        worktree_warning = "⚠️  **WORKTREE DETECTED**: This will create an ISOLATED copy of your data for this worktree. Your main dataset will remain unchanged.\n\n"
+                    
                     response["recommendation"] = (
+                        worktree_warning +
                         f"To complete the Code Query MCP setup for '{final_dataset_name}', "
                         f"I recommend running these {len(recommended_commands)} commands:\n\n" +
                         "\n".join(f"{i+1}. {cmd}" for i, cmd in enumerate(recommended_commands)) +
