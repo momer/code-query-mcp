@@ -204,7 +204,15 @@ class CodeQueryServer:
         self.db.commit()
     
     def _migrate_schema(self):
-        """Migrate schema to support datasets if needed."""
+        """Migrate schema to current version."""
+        # Create schema_version table if it doesn't exist
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version TEXT PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         # Check if dataset_id column exists
         cursor = self.db.execute("PRAGMA table_info(files)")
         columns = [col[1] for col in cursor.fetchall()]
@@ -389,26 +397,84 @@ class CodeQueryServer:
             except sqlite3.OperationalError as e:
                 logging.warning(f"Could not add dataset_type column: {e}")
         
-        # Add commit tracking columns to files table if missing
+        # Migrate to v1.0.0 if needed (commit tracking support)
+        cursor = self.db.execute("SELECT version FROM schema_version WHERE version = '1.0.0'")
+        if not cursor.fetchone():
+            self._migrate_to_v1_0_0()
+    
+    def _migrate_to_v1_0_0(self):
+        """Migrate to schema v1.0.0 with commit tracking."""
+        logging.info("Migrating to schema v1.0.0...")
+        
+        # Check if commit tracking columns exist
         cursor = self.db.execute("PRAGMA table_info(files)")
         file_columns = [col[1] for col in cursor.fetchall()]
         
         if 'documented_at_commit' not in file_columns:
-            logging.info("Adding commit tracking columns to files table...")
-            try:
-                self.db.execute("""
-                    ALTER TABLE files 
-                    ADD COLUMN documented_at_commit TEXT
-                """)
-                
-                self.db.execute("""
-                    ALTER TABLE files 
-                    ADD COLUMN documented_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                """)
-                
-                logging.info("Successfully added commit tracking columns to files table")
-            except sqlite3.OperationalError as e:
-                logging.warning(f"Could not add commit tracking columns: {e}")
+            logging.info("Adding commit tracking columns...")
+            
+            # Create new table with v1.0.0 schema
+            self.db.execute("""
+                CREATE TABLE files_v1 (
+                    dataset_id TEXT NOT NULL,
+                    filepath TEXT NOT NULL,
+                    filename TEXT,
+                    overview TEXT,
+                    ddd_context TEXT,
+                    functions TEXT,
+                    exports TEXT,
+                    imports TEXT,
+                    types_interfaces_classes TEXT,
+                    constants TEXT,
+                    dependencies TEXT,
+                    other_notes TEXT,
+                    documented_at_commit TEXT,
+                    documented_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (dataset_id, filepath)
+                )
+            """)
+            
+            # Copy existing data with current timestamp for documented_at
+            self.db.execute("""
+                INSERT INTO files_v1 (
+                    dataset_id, filepath, filename, overview, ddd_context,
+                    functions, exports, imports, types_interfaces_classes,
+                    constants, dependencies, other_notes, documented_at_commit,
+                    documented_at
+                )
+                SELECT 
+                    dataset_id, filepath, filename, overview, ddd_context,
+                    functions, exports, imports, types_interfaces_classes,
+                    constants, dependencies, other_notes, NULL,
+                    CURRENT_TIMESTAMP
+                FROM files
+            """)
+            
+            # Drop old table and rename new one
+            self.db.execute("DROP TABLE files")
+            self.db.execute("ALTER TABLE files_v1 RENAME TO files")
+            
+            # Recreate index
+            self.db.execute("""
+                CREATE INDEX idx_dataset_filepath ON files(dataset_id, filepath)
+            """)
+            
+            # Recreate FTS if it existed
+            cursor = self.db.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='files_fts'
+            """)
+            if cursor.fetchone():
+                self.db.execute("DROP TABLE files_fts")
+                self._create_fts_table()
+        
+        # Mark v1.0.0 as applied
+        self.db.execute("""
+            INSERT OR REPLACE INTO schema_version (version) VALUES ('1.0.0')
+        """)
+        
+        self.db.commit()
+        logging.info("Successfully migrated to schema v1.0.0")
     
     def import_data(self, dataset_name: str, directory: str, replace: bool = False) -> Dict[str, Any]:
         """Import JSON files from directory into named dataset."""
@@ -2231,34 +2297,37 @@ exit 0
             
             files_needing_catchup = []
             current_commit = get_current_commit(self.cwd)
-            
+
+            # Group files by commit hash to optimize git calls
+            files_by_commit = {}
             for file_row in documented_files:
-                filepath = file_row['filepath']
                 last_commit = file_row['documented_at_commit']
-                documented_at = file_row['documented_at']
-                
                 if not last_commit:
                     # File was documented without commit tracking (legacy)
                     files_needing_catchup.append({
-                        "filepath": filepath,
+                        "filepath": file_row['filepath'],
                         "reason": "no_commit_tracking",
                         "last_documented_commit": None,
-                        "documented_at": documented_at,
+                        "documented_at": file_row['documented_at'],
                         "current_commit": current_commit
                     })
-                    continue
-                
-                # Check if file has changed since last documentation
-                changed_files = get_changed_files_since_commit(last_commit, self.cwd)
-                
-                if filepath in changed_files:
-                    files_needing_catchup.append({
-                        "filepath": filepath,
-                        "reason": "file_changed",
-                        "last_documented_commit": last_commit,
-                        "documented_at": documented_at,
-                        "current_commit": current_commit
-                    })
+                else:
+                    if last_commit not in files_by_commit:
+                        files_by_commit[last_commit] = []
+                    files_by_commit[last_commit].append(file_row)
+
+            # Process files grouped by commit
+            for last_commit, files in files_by_commit.items():
+                changed_files_since_commit = set(get_changed_files_since_commit(last_commit, self.cwd))
+                for file_row in files:
+                    if file_row['filepath'] in changed_files_since_commit:
+                        files_needing_catchup.append({
+                            "filepath": file_row['filepath'],
+                            "reason": "file_changed",
+                            "last_documented_commit": last_commit,
+                            "documented_at": file_row['documented_at'],
+                            "current_commit": current_commit
+                        })
             
             return {
                 "success": True,
@@ -2269,6 +2338,7 @@ exit 0
             }
             
         except Exception as e:
+            logging.error(f"Error finding files needing catchup for {dataset_name}", exc_info=True)
             return {
                 "success": False,
                 "message": f"Error finding files needing catchup: {str(e)}"
@@ -2321,6 +2391,7 @@ exit 0
             }
             
         except Exception as e:
+            logging.error(f"Error backporting commit {commit_hash} to file {filepath} in dataset {dataset_name}", exc_info=True)
             return {
                 "success": False,
                 "message": f"Error backporting commit to file: {str(e)}"
@@ -2359,9 +2430,9 @@ exit 0
                 WHERE dataset_id = ? AND documented_at_commit IS NULL
             """, (dataset_name,))
             
-            files_without_commits = cursor.fetchall()
+            files_to_update = [row['filepath'] for row in cursor.fetchall()]
             
-            if not files_without_commits:
+            if not files_to_update:
                 return {
                     "success": True,
                     "message": "No files found without commit tracking",
@@ -2369,28 +2440,23 @@ exit 0
                     "commit_hash": commit_hash
                 }
             
-            # Update all files without commit tracking
-            updated_files = []
-            for file_row in files_without_commits:
-                filepath = file_row['filepath']
-                
-                self.db.execute("""
-                    UPDATE files 
-                    SET documented_at_commit = ?
-                    WHERE dataset_id = ? AND filepath = ?
-                """, (commit_hash, dataset_name, filepath))
-                
-                updated_files.append(filepath)
+            # Update all files in a single, efficient query
+            self.db.execute("""
+                UPDATE files 
+                SET documented_at_commit = ?
+                WHERE dataset_id = ? AND documented_at_commit IS NULL
+            """, (commit_hash, dataset_name))
             
             return {
                 "success": True,
-                "message": f"Successfully backported commit {commit_hash[:8]} to {len(updated_files)} files",
-                "updated_files": updated_files,
+                "message": f"Successfully backported commit {commit_hash[:8]} to {len(files_to_update)} files",
+                "updated_files": files_to_update,
                 "commit_hash": commit_hash,
-                "total_updated": len(updated_files)
+                "total_updated": len(files_to_update)
             }
             
         except Exception as e:
+            logging.error(f"Error bulk backporting commits for dataset {dataset_name}", exc_info=True)
             return {
                 "success": False,
                 "message": f"Error bulk backporting commits: {str(e)}"

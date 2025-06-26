@@ -222,7 +222,7 @@ def get_changed_files_since_commit(commit_hash: str, cwd: str = None) -> list[st
     if cwd is None:
         cwd = os.getcwd()
     
-    if not commit_hash:
+    if not commit_hash or commit_hash.startswith('-'):
         return []
     
     try:
