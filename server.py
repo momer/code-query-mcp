@@ -14,6 +14,7 @@ import glob
 import logging
 import fnmatch
 import subprocess
+import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from mcp.server import Server
@@ -25,9 +26,94 @@ from mcp.server.lowlevel import NotificationOptions
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Database configuration
-DB_DIR = os.path.join(os.getcwd(), ".mcp_code_query")
-DB_PATH = os.path.join(DB_DIR, "code_data.db")
+
+def get_git_info(cwd: str = None) -> dict | None:
+    """
+    Gathers key Git repository information, handling worktrees correctly.
+
+    Returns a dictionary with repo details, or None if not in a git repo.
+    """
+    if cwd is None:
+        cwd = os.getcwd()
+
+    try:
+        # Get the common git directory (points to main repo's .git)
+        git_common_dir = subprocess.check_output(
+            ["git", "rev-parse", "--git-common-dir"], cwd=cwd, text=True, stderr=subprocess.PIPE
+        ).strip()
+        
+        # The main repository root is the parent of the common git directory
+        toplevel = os.path.dirname(git_common_dir)
+
+        # Gets the current branch or tag name.
+        branch_name = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, text=True, stderr=subprocess.PIPE
+        ).strip()
+
+        # Sanitize the branch name to be a valid table name prefix.
+        # Replaces slashes (e.g., 'feature/new-ui') with underscores.
+        sanitized_branch = re.sub(r'[^a-zA-Z0-9_]', '_', branch_name)
+
+        return {
+            "toplevel_path": toplevel,
+            "branch_name": branch_name,
+            "table_prefix": f"data_{sanitized_branch}"  # e.g., data_main, data_feature_new_ui
+        }
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # This will trigger if not in a git repo or git is not installed.
+        logging.warning("Not a git repository or git command not found. Falling back to local directory.")
+        return None
+
+# Database configuration - attempt to get Git repository information
+git_info = get_git_info()
+
+if git_info:
+    # We are in a Git repository. Use the toplevel path for the DB.
+    DB_DIR = os.path.join(git_info["toplevel_path"], ".mcp_code_query")
+    DB_PATH = os.path.join(DB_DIR, "code_data.db")
+    # Use a branch-specific prefix for tables to ensure data isolation
+    TABLE_PREFIX = git_info["table_prefix"]
+    logging.info(f"Git repo detected. Using shared DB at {DB_PATH}. Active data prefix: '{TABLE_PREFIX}'")
+else:
+    # Fallback for non-Git directories. Use the current working directory.
+    DB_DIR = os.path.join(os.getcwd(), ".mcp_code_query")
+    DB_PATH = os.path.join(DB_DIR, "code_data.db")
+    # Use a default prefix when not in a git repo
+    TABLE_PREFIX = "data_local"
+    logging.info(f"No Git repo detected. Using local DB at {DB_PATH}.")
+
+# Ensure the database directory exists
+os.makedirs(DB_DIR, exist_ok=True)
+
+# Global database connection
+_db_connection = None
+
+def get_db_connection():
+    """
+    Establishes and returns a SQLite connection with WAL mode enabled.
+    Uses a global-like pattern to reuse the connection within the server process.
+    """
+    global _db_connection
+    # This simple singleton pattern is okay for a single-process server.
+    # For multi-process/threaded servers, you'd need thread-local storage.
+    if _db_connection is None:
+        try:
+            # The DB_PATH is now dynamically set based on our logic above
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False)  # check_same_thread for web servers
+            
+            # Enable WAL mode for better concurrency. This is the key change.
+            conn.execute("PRAGMA journal_mode=WAL;")
+            
+            # Use Row factory for dict-like access to results
+            conn.row_factory = sqlite3.Row
+            
+            _db_connection = conn
+            logging.info("Database connection established with WAL mode.")
+        except sqlite3.Error as e:
+            logging.error(f"Database connection failed: {e}")
+            raise
+            
+    return _db_connection
 
 
 class CodeQueryServer:
@@ -39,8 +125,7 @@ class CodeQueryServer:
         
     def setup_database(self):
         """Connect to persistent SQLite database."""
-        self.db = sqlite3.connect(DB_PATH)
-        self.db.row_factory = sqlite3.Row
+        self.db = get_db_connection()
         
         # Enable FTS5 if available
         self.db.execute("PRAGMA compile_options")
