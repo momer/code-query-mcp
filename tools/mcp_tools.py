@@ -50,7 +50,7 @@ def get_tools() -> List[Tool]:
         ),
         Tool(
             name="search_files",
-            description="Search files in dataset by query string. Use list_datasets first if you don't know the dataset name.",
+            description="Search files in dataset by query string. Returns limited overview information (filepath, filename, overview, ddd_context, match_snippet) for discovery. Use mcp__code-query__get_file tool to retrieve complete detailed documentation including functions, exports, imports, types, and constants. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -60,7 +60,7 @@ def get_tools() -> List[Tool]:
                     },
                     "dataset_name": {
                         "type": "string",
-                        "description": "Dataset to search in. Use list_datasets tool if unknown."
+                        "description": "Dataset to search in. Use mcp__code-query__get_project_config tool first to check for active dataset, then mcp__code-query__list_datasets if unknown."
                     },
                     "limit": {
                         "type": "integer",
@@ -73,7 +73,7 @@ def get_tools() -> List[Tool]:
         ),
         Tool(
             name="get_file",
-            description="Get complete details for a specific file. Supports partial path matching (e.g., 'login.ts' finds 'src/auth/login.ts'). Use list_datasets first if you don't know the dataset name.",
+            description="Get complete detailed documentation for a specific file including functions, exports, imports, types, interfaces, classes, constants, dependencies, and other comprehensive analysis. This provides full details that mcp__code-query__search_files does not include. Supports partial path matching (e.g., 'login.ts' finds 'src/auth/login.ts'). Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -83,7 +83,7 @@ def get_tools() -> List[Tool]:
                     },
                     "dataset_name": {
                         "type": "string",
-                        "description": "Dataset containing the file. Use list_datasets tool if unknown."
+                        "description": "Dataset containing the file. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown."
                     },
                     "limit": {
                         "type": "integer",
@@ -96,13 +96,13 @@ def get_tools() -> List[Tool]:
         ),
         Tool(
             name="list_domains",
-            description="List all unique DDD context domains in dataset. Use list_datasets first if you don't know the dataset name.",
+            description="List all unique DDD context domains in dataset. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "dataset_name": {
                         "type": "string",
-                        "description": "Dataset to analyze. Use list_datasets tool if unknown."
+                        "description": "Dataset to analyze. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown."
                     }
                 },
                 "required": ["dataset_name"]
@@ -126,13 +126,13 @@ def get_tools() -> List[Tool]:
         ),
         Tool(
             name="clear_dataset",
-            description="Clear a specific dataset. Use list_datasets to see available datasets.",
+            description="Clear a specific dataset. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "dataset_name": {
                         "type": "string",
-                        "description": "Dataset to clear. Use list_datasets tool to see available options."
+                        "description": "Dataset to clear. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown."
                     }
                 },
                 "required": ["dataset_name"]
@@ -174,7 +174,7 @@ def get_tools() -> List[Tool]:
                 "properties": {
                     "dataset_name": {
                         "type": "string",
-                        "description": "Dataset to insert into. Use list_datasets tool if unknown."
+                        "description": "Dataset to insert into. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown."
                     },
                     "filepath": {
                         "type": "string",
@@ -234,7 +234,7 @@ def get_tools() -> List[Tool]:
                 "properties": {
                     "dataset_name": {
                         "type": "string",
-                        "description": "Dataset containing the file. Use list_datasets tool if unknown."
+                        "description": "Dataset containing the file. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown."
                     },
                     "filepath": {
                         "type": "string",
@@ -335,13 +335,13 @@ def get_tools() -> List[Tool]:
         ),
         Tool(
             name="fork_dataset",
-            description="Fork (copy) a dataset to a new name. Useful for git worktrees where you want to work on the same codebase with different branches. Use list_datasets first if you don't know the source dataset name.",
+            description="Fork (copy) a dataset to a new name. Useful for git worktrees where you want to work on the same codebase with different branches. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if source dataset name is unknown.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "source_dataset": {
                         "type": "string",
-                        "description": "Source dataset to copy from. Use list_datasets tool if unknown."
+                        "description": "Source dataset to copy from. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown."
                     },
                     "target_dataset": {
                         "type": "string",
