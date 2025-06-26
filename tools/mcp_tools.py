@@ -418,6 +418,10 @@ Returns content snippets with [MATCH] markers around found terms.""",
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Patterns to exclude (e.g., '*.test.js', 'node_modules/*'). Defaults to common exclusions if not provided."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model to use for code analysis (e.g., 'sonnet', 'opus', or full model name). If not provided, user will be prompted to select interactively."
                     }
                 },
                 "required": ["dataset_name"]

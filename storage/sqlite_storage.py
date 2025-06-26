@@ -99,6 +99,39 @@ class CodeQueryServer:
         # Only allow safe characters
         return bool(re.match(r'^[a-zA-Z0-9_.-]+$', dataset_name))
     
+    def _prompt_for_model_selection(self) -> str:
+        """Prompt user to select a model for code analysis."""
+        print("\n=== Model Selection ===")
+        print("Please select a model for code analysis:")
+        print("1. Opus (latest)")
+        print("2. Sonnet (latest)")
+        print("3. Specify other model name")
+        
+        models = {
+            "1": "opus",
+            "2": "sonnet"
+        }
+        
+        while True:
+            try:
+                choice = input("\nSelect option (1-3) [default: 2]: ").strip()
+                if not choice:
+                    choice = "2"
+                
+                if choice in models:
+                    return models[choice]
+                elif choice == "3":
+                    custom_model = input("Enter model name: ").strip()
+                    if custom_model:
+                        return custom_model
+                    else:
+                        print("Please enter a valid model name.")
+                else:
+                    print("Please enter a valid option (1-3).")
+            except (EOFError, KeyboardInterrupt):
+                print("\nUsing default model: sonnet")
+                return "sonnet"
+    
     def _create_schema(self):
         """Create database schema with dataset support and FTS5."""
         # Main files table with dataset_id
@@ -1180,7 +1213,7 @@ Would you like me to provide the file batches for you to process?
                 "message": f"Error getting project config: {str(e)}"
             }
     
-    def create_project_config(self, dataset_name: str, exclude_patterns: List[str] = None) -> Dict[str, Any]:
+    def create_project_config(self, dataset_name: str, exclude_patterns: List[str] = None, model: str = None) -> Dict[str, Any]:
         """Create or update project configuration file with automatic worktree handling."""
         try:
             # Validate dataset name first
@@ -1270,9 +1303,15 @@ Would you like me to provide the file batches for you to process?
                     ".pytest_cache/*"
                 ]
             
+            # Model selection with interactive prompt if not provided
+            selected_model = model
+            if not selected_model:
+                selected_model = self._prompt_for_model_selection()
+            
             config_data = {
                 "mainDatasetName": actual_dataset_name,
                 "excludePatterns": exclude_patterns,
+                "model": selected_model,
                 "createdAt": datetime.now().isoformat(),
                 "version": "1.1.0"
             }

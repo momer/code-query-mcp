@@ -184,7 +184,8 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
     elif name == "create_project_config":
         dataset_name = arguments.get("dataset_name", "")
         exclude_patterns = arguments.get("exclude_patterns")
-        result = query_server.create_project_config(dataset_name, exclude_patterns)
+        model = arguments.get("model")
+        result = query_server.create_project_config(dataset_name, exclude_patterns, model)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
     elif name == "fork_dataset":
