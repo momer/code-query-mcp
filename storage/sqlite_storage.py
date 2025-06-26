@@ -1307,7 +1307,7 @@ Would you like me to provide the file batches for you to process?
             source_metadata = cursor.fetchone()
             
             # Copy all files
-            self.db.execute("""
+            cursor = self.db.execute("""
                 INSERT INTO files (
                     dataset_id, filepath, filename, overview, ddd_context,
                     functions, exports, imports, types_interfaces_classes,
@@ -1321,7 +1321,7 @@ Would you like me to provide the file batches for you to process?
                 WHERE dataset_id = ?
             """, (target_dataset, source_dataset))
             
-            files_copied = self.db.total_changes
+            files_copied = cursor.rowcount
             
             # Detect if this is a worktree dataset by checking if we're in a worktree
             from helpers.git_helper import is_worktree
