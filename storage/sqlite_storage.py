@@ -996,10 +996,10 @@ Would you like me to provide the file batches for you to process?
                 ]
             
             config_data = {
-                "datasetName": dataset_name,
+                "mainDatasetName": dataset_name,
                 "excludePatterns": exclude_patterns,
                 "createdAt": datetime.now().isoformat(),
-                "version": "1.0.0"
+                "version": "1.1.0"
             }
             
             # Write config file

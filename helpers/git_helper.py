@@ -40,7 +40,7 @@ def get_git_info(cwd: str = None) -> dict | None:
         return {
             "toplevel_path": toplevel,
             "branch_name": branch_name,
-            "table_prefix": f"data_{sanitized_branch}"  # e.g., data_main, data_feature_new_ui
+            "sanitized_branch_name": sanitized_branch
         }
     except (subprocess.CalledProcessError, FileNotFoundError):
         # This will trigger if not in a git repo or git is not installed.
@@ -75,3 +75,124 @@ def get_actual_git_dir(cwd: str = None) -> str | None:
     except (subprocess.TimeoutExpired, OSError) as e:
         logging.error(f"Error running git command: {e}")
         return None
+
+
+def is_worktree(cwd: str = None) -> bool:
+    """
+    Check if the current directory is a git worktree (not the main worktree).
+    
+    Returns True if in a linked worktree, False if in main worktree or not in git.
+    """
+    if cwd is None:
+        cwd = os.getcwd()
+    
+    try:
+        # Check if we're inside a work tree at all
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0 or result.stdout.strip() != "true":
+            return False
+        
+        # Check if .git is a file (linked worktree) or directory (main worktree)
+        git_path = os.path.join(cwd, ".git")
+        if os.path.exists(git_path) and os.path.isfile(git_path):
+            return True
+        
+        # Walk up the directory tree to find .git
+        current = cwd
+        while current != os.path.dirname(current):  # Stop at root
+            git_path = os.path.join(current, ".git")
+            if os.path.exists(git_path):
+                return os.path.isfile(git_path)
+            current = os.path.dirname(current)
+        
+        return False
+        
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return False
+
+
+def get_main_worktree_path(cwd: str = None) -> str | None:
+    """
+    Get the path to the main worktree from any worktree.
+    
+    Returns the absolute path to the main worktree, or None if not in a git repo.
+    """
+    if cwd is None:
+        cwd = os.getcwd()
+    
+    try:
+        # Get the common git directory path
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10
+        )
+        
+        git_common_dir = result.stdout.strip()
+        
+        # The main worktree is the parent of the .git directory
+        # Remove the /.git suffix to get the main worktree path
+        if git_common_dir.endswith("/.git"):
+            return git_common_dir[:-5]
+        elif git_common_dir.endswith("\\.git"):  # Windows
+            return git_common_dir[:-5]
+        else:
+            # Shouldn't happen with a properly configured repo
+            logging.warning(f"Unexpected git common dir format: {git_common_dir}")
+            return os.path.dirname(git_common_dir)
+            
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
+        logging.debug(f"Failed to get main worktree path: {e}")
+        return None
+
+
+def get_worktree_info(cwd: str = None) -> dict | None:
+    """
+    Get comprehensive worktree information.
+    
+    Returns a dict with:
+    - is_worktree: bool - True if in a linked worktree
+    - main_path: str - Path to the main worktree
+    - current_path: str - Path to current worktree
+    - branch: str - Current branch name
+    
+    Returns None if not in a git repository.
+    """
+    if cwd is None:
+        cwd = os.getcwd()
+    
+    git_info = get_git_info(cwd)
+    if not git_info:
+        return None
+    
+    is_linked = is_worktree(cwd)
+    main_path = get_main_worktree_path(cwd)
+    
+    # Get the actual worktree path (not just cwd)
+    try:
+        current_path = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            text=True,
+            stderr=subprocess.PIPE
+        ).strip()
+    except subprocess.CalledProcessError:
+        current_path = cwd
+    
+    return {
+        "is_worktree": is_linked,
+        "main_path": main_path,
+        "current_path": current_path,
+        "branch": git_info["branch_name"],
+        "sanitized_branch": git_info["sanitized_branch_name"]
+    }
