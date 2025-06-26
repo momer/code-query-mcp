@@ -50,7 +50,22 @@ def get_tools() -> List[Tool]:
         ),
         Tool(
             name="search_files",
-            description="Search files in dataset by query string. Returns limited overview information (filepath, filename, overview, ddd_context, match_snippet) for discovery. Use mcp__code-query__get_file tool to retrieve complete detailed documentation including functions, exports, imports, types, and constants. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown.",
+            description="""Search files in dataset by query string. Returns limited overview information (filepath, filename, overview, ddd_context, match_snippet) for discovery. Use mcp__code-query__get_file tool to retrieve complete detailed documentation including functions, exports, imports, types, and constants. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown.
+
+FTS5 Query Syntax:
+• Basic: Multiple words are ANDed together (e.g., "auth login")
+• Phrases: Use quotes for exact phrases (e.g., "user authentication")
+• Prefix: Add * for prefix matching (e.g., "auth*" matches authentication, authorize)
+• Boolean: OR, NOT operators (e.g., "login OR signup", "auth NOT test")
+• NEAR: Find terms within proximity (e.g., "NEAR(auth login, 5)")
+• Columns: Search specific fields (e.g., "overview:authentication", "{overview filename}:login")
+• Initial: Use ^ to match at start (e.g., "^class")
+
+Examples:
+- "auth* login" - Files with auth-prefixed words AND login
+- '"user authentication" OR "user auth"' - Either exact phrase
+- "controller NOT test" - Controllers excluding test files
+- "overview:security imports:crypto" - Security in overview AND crypto in imports""",
             inputSchema={
                 "type": "object",
                 "properties": {
