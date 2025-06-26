@@ -11,6 +11,7 @@ import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from helpers.git_helper import get_actual_git_dir, get_current_commit, get_changed_files_since_commit
+from storage.migrations import SchemaMigrator
 
 
 # Global database connection
@@ -72,7 +73,15 @@ class CodeQueryServer:
             logging.info(f"Created database schema at {self.db_path}")
         else:
             # Check if we need to migrate to newer schema
-            self._migrate_schema()
+            migrator = SchemaMigrator(self.db)
+            migrator.migrate_to_current_version()
+            # Recreate FTS if needed after migration
+            cursor = self.db.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='files_fts'
+            """)
+            if not cursor.fetchone():
+                self._create_fts_table()
             logging.info(f"Connected to existing database at {self.db_path}")
     
     def _get_actual_git_dir(self) -> Optional[str]:
@@ -203,86 +212,6 @@ class CodeQueryServer:
         
         self.db.commit()
     
-    def _migrate_schema(self):
-        """Migrate schema to current version."""
-        # Create schema_version table if it doesn't exist
-        self.db.execute("""
-            CREATE TABLE IF NOT EXISTS schema_version (
-                version TEXT PRIMARY KEY,
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Check if dataset_id column exists
-        cursor = self.db.execute("PRAGMA table_info(files)")
-        columns = [col[1] for col in cursor.fetchall()]
-        
-        if 'dataset_id' not in columns:
-            logging.info("Migrating schema to support datasets...")
-            
-            # Create new table with dataset support
-            self.db.execute("""
-                CREATE TABLE files_new (
-                    dataset_id TEXT NOT NULL,
-                    filepath TEXT NOT NULL,
-                    filename TEXT,
-                    overview TEXT,
-                    ddd_context TEXT,
-                    functions TEXT,
-                    exports TEXT,
-                    imports TEXT,
-                    types_interfaces_classes TEXT,
-                    constants TEXT,
-                    dependencies TEXT,
-                    other_notes TEXT,
-                    PRIMARY KEY (dataset_id, filepath)
-                )
-            """)
-            
-            # Copy existing data with default dataset name
-            self.db.execute("""
-                INSERT INTO files_new 
-                SELECT 'default', * FROM files
-            """)
-            
-            # Drop old table and rename new one
-            self.db.execute("DROP TABLE files")
-            self.db.execute("ALTER TABLE files_new RENAME TO files")
-            
-            # Recreate index
-            self.db.execute("""
-                CREATE INDEX idx_dataset_filepath ON files(dataset_id, filepath)
-            """)
-            
-            # Recreate FTS if it existed
-            cursor = self.db.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='files_fts'
-            """)
-            if cursor.fetchone():
-                # Drop and recreate FTS
-                self.db.execute("DROP TABLE files_fts")
-                self._create_fts_table()
-            
-            self.db.commit()
-            logging.info("Schema migration completed")
-        
-        # Ensure dataset_metadata table exists
-        cursor = self.db.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND name='dataset_metadata'
-        """)
-        
-        if not cursor.fetchone():
-            self.db.execute("""
-                CREATE TABLE dataset_metadata (
-                    dataset_id TEXT PRIMARY KEY,
-                    source_dir TEXT,
-                    files_count INTEGER,
-                    loaded_at TIMESTAMP
-                )
-            """)
-            self.db.commit()
     
     def _create_fts_table(self):
         """Helper to create FTS table and triggers."""
@@ -353,128 +282,6 @@ class CodeQueryServer:
         except sqlite3.OperationalError as e:
             logging.warning(f"Could not create FTS5 table: {e}")
         
-        # Check and migrate dataset_metadata table to add parent tracking
-        cursor = self.db.execute("PRAGMA table_info(dataset_metadata)")
-        columns = [col[1] for col in cursor.fetchall()]
-        
-        if 'parent_dataset_id' not in columns:
-            logging.info("Migrating dataset_metadata schema to support parent tracking...")
-            
-            # Add new columns for worktree tracking
-            try:
-                self.db.execute("""
-                    ALTER TABLE dataset_metadata 
-                    ADD COLUMN parent_dataset_id TEXT
-                """)
-                
-                self.db.execute("""
-                    ALTER TABLE dataset_metadata 
-                    ADD COLUMN source_branch TEXT
-                """)
-                
-                # No foreign key constraints can be added via ALTER TABLE in SQLite
-                # But we've documented the relationship in the schema
-                
-                logging.info("Successfully added parent tracking columns to dataset_metadata")
-            except sqlite3.OperationalError as e:
-                logging.warning(f"Could not add parent tracking columns: {e}")
-        
-        # Add dataset_type column if missing
-        if 'dataset_type' not in columns:
-            logging.info("Adding dataset_type column to dataset_metadata...")
-            try:
-                self.db.execute("""
-                    ALTER TABLE dataset_metadata 
-                    ADD COLUMN dataset_type TEXT DEFAULT 'main'
-                """)
-                
-                # Update existing worktree datasets based on naming pattern
-                # New pattern: mainDataset_branchName (contains underscore but not __wt_)
-                # This is tricky because we can't easily distinguish worktree datasets
-                # from main datasets that have underscores. For migration, we'll skip this.
-                
-                logging.info("Successfully added dataset_type column")
-            except sqlite3.OperationalError as e:
-                logging.warning(f"Could not add dataset_type column: {e}")
-        
-        # Migrate to v1.0.0 if needed (commit tracking support)
-        cursor = self.db.execute("SELECT version FROM schema_version WHERE version = '1.0.0'")
-        if not cursor.fetchone():
-            self._migrate_to_v1_0_0()
-    
-    def _migrate_to_v1_0_0(self):
-        """Migrate to schema v1.0.0 with commit tracking."""
-        logging.info("Migrating to schema v1.0.0...")
-        
-        # Check if commit tracking columns exist
-        cursor = self.db.execute("PRAGMA table_info(files)")
-        file_columns = [col[1] for col in cursor.fetchall()]
-        
-        if 'documented_at_commit' not in file_columns:
-            logging.info("Adding commit tracking columns...")
-            
-            # Create new table with v1.0.0 schema
-            self.db.execute("""
-                CREATE TABLE files_v1 (
-                    dataset_id TEXT NOT NULL,
-                    filepath TEXT NOT NULL,
-                    filename TEXT,
-                    overview TEXT,
-                    ddd_context TEXT,
-                    functions TEXT,
-                    exports TEXT,
-                    imports TEXT,
-                    types_interfaces_classes TEXT,
-                    constants TEXT,
-                    dependencies TEXT,
-                    other_notes TEXT,
-                    documented_at_commit TEXT,
-                    documented_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (dataset_id, filepath)
-                )
-            """)
-            
-            # Copy existing data with current timestamp for documented_at
-            self.db.execute("""
-                INSERT INTO files_v1 (
-                    dataset_id, filepath, filename, overview, ddd_context,
-                    functions, exports, imports, types_interfaces_classes,
-                    constants, dependencies, other_notes, documented_at_commit,
-                    documented_at
-                )
-                SELECT 
-                    dataset_id, filepath, filename, overview, ddd_context,
-                    functions, exports, imports, types_interfaces_classes,
-                    constants, dependencies, other_notes, NULL,
-                    CURRENT_TIMESTAMP
-                FROM files
-            """)
-            
-            # Drop old table and rename new one
-            self.db.execute("DROP TABLE files")
-            self.db.execute("ALTER TABLE files_v1 RENAME TO files")
-            
-            # Recreate index
-            self.db.execute("""
-                CREATE INDEX idx_dataset_filepath ON files(dataset_id, filepath)
-            """)
-            
-            # Recreate FTS if it existed
-            cursor = self.db.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='files_fts'
-            """)
-            if cursor.fetchone():
-                self.db.execute("DROP TABLE files_fts")
-                self._create_fts_table()
-        
-        # Mark v1.0.0 as applied
-        self.db.execute("""
-            INSERT OR REPLACE INTO schema_version (version) VALUES ('1.0.0')
-        """)
-        
-        self.db.commit()
-        logging.info("Successfully migrated to schema v1.0.0")
     
     def import_data(self, dataset_name: str, directory: str, replace: bool = False) -> Dict[str, Any]:
         """Import JSON files from directory into named dataset."""
