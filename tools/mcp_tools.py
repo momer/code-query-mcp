@@ -52,6 +52,10 @@ def get_tools() -> List[Tool]:
             name="search_files",
             description="""Search files in dataset by query string. Returns limited overview information (filepath, filename, overview, ddd_context, match_snippet) for discovery. Use mcp__code-query__get_file tool to retrieve complete detailed documentation including functions, exports, imports, types, and constants. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown.
 
+IMPORTANT: This is code search, not web search. Use short, focused queries with technical terms that would appear in code.
+Good: "auth", "login handler", "websocket"
+Bad: "how to implement authentication" (too conversational)
+
 FTS5 Query Syntax:
 • Basic: Multiple words are ANDed together (e.g., "auth login")
 • Phrases: Use quotes for exact phrases (e.g., "user authentication")
