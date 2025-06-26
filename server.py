@@ -222,8 +222,8 @@ async def main():
                     main_dataset_name = main_config.get("mainDatasetName") or main_config.get("datasetName")
                     
                     if main_dataset_name:
-                        # Derive worktree dataset name
-                        worktree_dataset_name = f"{main_dataset_name}__{worktree_info['sanitized_branch']}"
+                        # Derive worktree dataset name - use cleaner naming without __wt_
+                        worktree_dataset_name = f"{main_dataset_name}_{worktree_info['sanitized_branch']}"
                         
                         # Check if worktree dataset exists
                         existing_datasets = {d['name'] for d in query_server.list_datasets()}

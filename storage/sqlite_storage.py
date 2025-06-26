@@ -110,7 +110,11 @@ class CodeQueryServer:
                 dataset_id TEXT PRIMARY KEY,
                 source_dir TEXT,
                 files_count INTEGER,
-                loaded_at TIMESTAMP
+                loaded_at TIMESTAMP,
+                dataset_type TEXT DEFAULT 'main',
+                parent_dataset_id TEXT,
+                source_branch TEXT,
+                FOREIGN KEY(parent_dataset_id) REFERENCES dataset_metadata(dataset_id) ON DELETE SET NULL
             )
         """)
         
@@ -352,6 +356,26 @@ class CodeQueryServer:
                 logging.info("Successfully added parent tracking columns to dataset_metadata")
             except sqlite3.OperationalError as e:
                 logging.warning(f"Could not add parent tracking columns: {e}")
+        
+        # Add dataset_type column if missing
+        if 'dataset_type' not in columns:
+            logging.info("Adding dataset_type column to dataset_metadata...")
+            try:
+                self.db.execute("""
+                    ALTER TABLE dataset_metadata 
+                    ADD COLUMN dataset_type TEXT DEFAULT 'main'
+                """)
+                
+                # Update existing worktree datasets based on naming pattern
+                self.db.execute("""
+                    UPDATE dataset_metadata 
+                    SET dataset_type = 'worktree'
+                    WHERE dataset_id LIKE '%__wt_%'
+                """)
+                
+                logging.info("Successfully added dataset_type column")
+            except sqlite3.OperationalError as e:
+                logging.warning(f"Could not add dataset_type column: {e}")
     
     def import_data(self, dataset_name: str, directory: str, replace: bool = False) -> Dict[str, Any]:
         """Import JSON files from directory into named dataset."""
@@ -417,9 +441,9 @@ class CodeQueryServer:
         # Update dataset metadata
         self.db.execute("""
             INSERT OR REPLACE INTO dataset_metadata 
-            (dataset_id, source_dir, files_count, loaded_at)
-            VALUES (?, ?, ?, ?)
-        """, (dataset_name, directory, imported, datetime.now()))
+            (dataset_id, source_dir, files_count, loaded_at, dataset_type)
+            VALUES (?, ?, ?, ?, ?)
+        """, (dataset_name, directory, imported, datetime.now(), 'main'))
         
         self.db.commit()
         
@@ -845,9 +869,9 @@ Would you like me to provide the file batches for you to process?
             # Create metadata entry if it doesn't exist
             self.db.execute("""
                 INSERT OR IGNORE INTO dataset_metadata 
-                (dataset_id, source_dir, files_count, loaded_at)
-                VALUES (?, ?, 1, ?)
-            """, (dataset_name, os.path.dirname(filepath), datetime.now()))
+                (dataset_id, source_dir, files_count, loaded_at, dataset_type)
+                VALUES (?, ?, 1, ?, ?)
+            """, (dataset_name, os.path.dirname(filepath), datetime.now(), 'main'))
             
             self.db.commit()
             
@@ -1098,8 +1122,9 @@ Would you like me to provide the file batches for you to process?
             
             files_copied = self.db.total_changes
             
-            # Detect if this is a worktree dataset by naming convention
-            is_worktree_dataset = "__wt_" in target_dataset
+            # Detect if this is a worktree dataset by checking if we're in a worktree
+            from helpers.git_helper import is_worktree
+            is_worktree_dataset = is_worktree(self.cwd)
             
             # Get current branch if this is a worktree fork
             source_branch = None
@@ -1120,13 +1145,14 @@ Would you like me to provide the file batches for you to process?
             # Create metadata entry for target dataset
             self.db.execute("""
                 INSERT INTO dataset_metadata 
-                (dataset_id, source_dir, files_count, loaded_at, parent_dataset_id, source_branch)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (dataset_id, source_dir, files_count, loaded_at, dataset_type, parent_dataset_id, source_branch)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 target_dataset,
                 f"{source_metadata['source_dir']} (forked from {source_dataset})",
                 files_copied,
                 datetime.now(),
+                'worktree' if is_worktree_dataset else 'main',
                 source_dataset if is_worktree_dataset else None,
                 source_branch
             ))
@@ -1442,28 +1468,27 @@ exit 0
                 sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', branch)
                 active_branches.add(sanitized)
             
-            # 2. Find worktree datasets (by naming pattern or metadata)
-            # First try new metadata approach
+            # 2. Find worktree datasets using dataset_type column
             cursor = self.db.execute("""
                 SELECT dataset_id, source_branch 
                 FROM dataset_metadata 
-                WHERE source_branch IS NOT NULL
+                WHERE dataset_type = 'worktree' AND source_branch IS NOT NULL
             """)
-            metadata_datasets = cursor.fetchall()
+            type_based_datasets = cursor.fetchall()
             
-            # Also check naming convention for backward compatibility
+            # Also check naming convention for backward compatibility with old datasets
             cursor = self.db.execute("""
                 SELECT dataset_id 
                 FROM dataset_metadata 
-                WHERE dataset_id LIKE '%__wt_%'
+                WHERE dataset_id LIKE '%__wt_%' AND (dataset_type IS NULL OR dataset_type = 'main')
             """)
             pattern_datasets = cursor.fetchall()
             
             # 3. Identify orphans
             orphans = []
             
-            # Check metadata-based datasets
-            for row in metadata_datasets:
+            # Check type-based datasets
+            for row in type_based_datasets:
                 dataset_id = row['dataset_id']
                 source_branch = row['source_branch']
                 sanitized_branch = re.sub(r'[^a-zA-Z0-9_]', '_', source_branch)
@@ -1471,7 +1496,7 @@ exit 0
                     orphans.append({
                         'dataset_id': dataset_id,
                         'source_branch': source_branch,
-                        'detection_method': 'metadata'
+                        'detection_method': 'dataset_type'
                     })
             
             # Check pattern-based datasets

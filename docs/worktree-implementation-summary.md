@@ -5,8 +5,9 @@
 ### 1. Core Worktree Detection and Auto-forking ✓
 - Added `is_worktree()`, `get_main_worktree_path()`, and `get_worktree_info()` to `helpers/git_helper.py`
 - Updated `server.py` to detect worktrees on startup and auto-fork datasets
-- Naming convention: `{main_dataset}__wt_{sanitized_branch}`
+- Naming convention: `{main_dataset}_{sanitized_branch}` (cleaner, no __wt_ prefix)
 - Config schema updated to use `mainDatasetName` (v1.1.0)
+- Added `dataset_type` column to properly track worktree vs main datasets
 
 ### 2. Sync Dataset Tool ✓
 - **Tool**: `sync_dataset` - Syncs documentation changes between datasets after git merges
@@ -27,15 +28,18 @@
 
 ### 3. Enhanced Dataset Metadata ✓
 - **Schema Update**: Added columns to `dataset_metadata` table:
+  - `dataset_type`: Properly identifies 'main' vs 'worktree' datasets
   - `parent_dataset_id`: Links worktree datasets to their parent
   - `source_branch`: Tracks which branch the dataset is for
-- **Auto-population**: `fork_dataset()` now detects worktree datasets and populates parent tracking
+- **Auto-population**: `fork_dataset()` detects if running in worktree and sets type accordingly
 - **Migration**: Added to `_migrate_schema()` for existing databases
+- **Clean Design**: No more string parsing - uses proper database columns
 
 ### 4. Cleanup Orphaned Datasets Tool ✓
 - **Tool**: `cleanup_datasets` - Finds and removes datasets for deleted branches
 - **Features**:
-  - Detects orphans via metadata (new) or naming pattern (backward compatible)
+  - Detects orphans via `dataset_type = 'worktree'` (clean approach)
+  - Falls back to naming pattern for backward compatibility
   - Dry run mode by default for safety
   - Compares against active git branches (local and remote)
   - Transactional deletion
@@ -55,7 +59,7 @@
 ## Usage Workflow
 
 1. **Create Worktree**: `git worktree add ../feature feature/new-ui`
-2. **Auto-fork**: Server detects worktree and creates `project__wt_feature_new_ui`
+2. **Auto-fork**: Server detects worktree and creates `project_feature_new_ui` dataset
 3. **Develop**: Make changes and update documentation in isolation
 4. **Merge**: `git checkout main && git merge feature/new-ui`
 5. **Sync**: Use `sync_dataset` tool to copy documentation updates

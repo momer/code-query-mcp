@@ -30,6 +30,12 @@ This document contains the complete implementation plan for git worktree dataset
 
 **Rationale**: Replace fragile git hook that relies on `claude --print` with explicit, reliable tool.
 
+**Benefits of dataset_type column over __wt_ naming**:
+- Clean separation of data and metadata
+- More flexible (can add other dataset types later)
+- Easier queries (WHERE dataset_type = 'worktree' vs LIKE '%__wt_%')
+- Better database design principles
+
 **Implementation Details**:
 
 #### Add to `tools/mcp_tools.py`:
