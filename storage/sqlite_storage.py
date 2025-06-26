@@ -78,6 +78,17 @@ class CodeQueryServer:
         """Determines the actual .git directory path, handling worktrees."""
         return get_actual_git_dir(self.cwd)
     
+    def _is_valid_dataset_name(self, dataset_name: str) -> bool:
+        """Validates a dataset name against security and naming rules."""
+        # Prevent path traversal
+        if dataset_name in ('.', '..'):
+            return False
+        # Ensure it doesn't contain path separators or other dangerous chars
+        if '/' in dataset_name or '\\' in dataset_name:
+            return False
+        # Only allow safe characters
+        return bool(re.match(r'^[a-zA-Z0-9_.-]+$', dataset_name))
+    
     def _create_schema(self):
         """Create database schema with dataset support and FTS5."""
         # Main files table with dataset_id
@@ -1020,12 +1031,76 @@ Would you like me to provide the file batches for you to process?
             }
     
     def create_project_config(self, dataset_name: str, exclude_patterns: List[str] = None) -> Dict[str, Any]:
-        """Create or update project configuration file."""
+        """Create or update project configuration file with automatic worktree handling."""
         try:
+            # Validate dataset name first
+            if not self._is_valid_dataset_name(dataset_name):
+                return {
+                    "success": False,
+                    "message": "Invalid dataset_name. It cannot be '.' or '..', contain slashes, and must consist of alphanumeric characters, underscore, dot, or hyphen."
+                }
+            
             config_dir = os.path.join(self.cwd, ".code-query")
             os.makedirs(config_dir, exist_ok=True)
             
             config_path = os.path.join(config_dir, "config.json")
+            
+            # Check if we're in a worktree
+            from helpers.git_helper import get_worktree_info
+            wt_info = get_worktree_info(self.cwd)
+            
+            actual_dataset_name = dataset_name
+            auto_fork_info = None
+            
+            if wt_info and wt_info['is_worktree']:
+                # We're in a worktree - need special handling
+                main_path = wt_info['main_path']
+                sanitized_branch = wt_info['sanitized_branch']
+                
+                # Try to find the main dataset from main worktree's config
+                main_config_path = os.path.join(main_path, ".code-query", "config.json")
+                main_dataset = None
+                
+                if os.path.exists(main_config_path):
+                    try:
+                        with open(main_config_path, 'r') as f:
+                            main_config = json.load(f)
+                            main_dataset = main_config.get('mainDatasetName')
+                    except Exception:
+                        pass
+                
+                if not main_dataset:
+                    # Use the provided name as base
+                    main_dataset = dataset_name
+                
+                # Create worktree-specific dataset name
+                wt_dataset_name = f"{main_dataset}__wt_{sanitized_branch}"
+                
+                # Check if we need to fork
+                cursor = self.db.execute("""
+                    SELECT COUNT(*) as count FROM files WHERE dataset_id = ?
+                """, (wt_dataset_name,))
+                wt_exists = cursor.fetchone()['count'] > 0
+                
+                if not wt_exists:
+                    # Check if main dataset exists to fork from
+                    cursor = self.db.execute("""
+                        SELECT COUNT(*) as count FROM files WHERE dataset_id = ?
+                    """, (main_dataset,))
+                    main_exists = cursor.fetchone()['count'] > 0
+                    
+                    if main_exists:
+                        # Fork the main dataset
+                        fork_result = self.fork_dataset(main_dataset, wt_dataset_name)
+                        if fork_result['success']:
+                            auto_fork_info = {
+                                "forked": True,
+                                "from": main_dataset,
+                                "to": wt_dataset_name,
+                                "files": fork_result.get('files_copied', 0)
+                            }
+                
+                actual_dataset_name = wt_dataset_name
             
             # Default exclude patterns if not provided
             if exclude_patterns is None:
@@ -1046,22 +1121,37 @@ Would you like me to provide the file batches for you to process?
                 ]
             
             config_data = {
-                "mainDatasetName": dataset_name,
+                "mainDatasetName": actual_dataset_name,
                 "excludePatterns": exclude_patterns,
                 "createdAt": datetime.now().isoformat(),
                 "version": "1.1.0"
             }
             
+            # Add worktree info to config if applicable
+            if wt_info and wt_info['is_worktree']:
+                config_data['worktreeInfo'] = {
+                    'branch': wt_info['branch'],
+                    'mainDataset': main_dataset,
+                    'isWorktree': True
+                }
+            
             # Write config file
             with open(config_path, 'w') as f:
                 json.dump(config_data, f, indent=2)
             
-            return {
+            # Build response
+            response = {
                 "success": True,
-                "message": f"Created project configuration for dataset '{dataset_name}'",
+                "message": f"Created project configuration for dataset '{actual_dataset_name}'",
                 "config_path": config_path,
                 "config": config_data
             }
+            
+            if auto_fork_info:
+                response["auto_fork"] = auto_fork_info
+                response["message"] += f" (auto-forked {auto_fork_info['files']} files from '{auto_fork_info['from']}')"
+            
+            return response
             
         except Exception as e:
             return {
@@ -1212,56 +1302,107 @@ Would you like me to provide the file batches for you to process?
                     "message": "No .code-query/config.json found. Please run create_project_config first."
                 }
             
-            # Get the install script path
-            scripts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
-            install_script = os.path.join(scripts_dir, "install-pre-commit-hook.sh")
-            
-            if not os.path.exists(install_script):
+            # Validate dataset_name to prevent shell injection and path traversal
+            if not self._is_valid_dataset_name(dataset_name):
                 return {
                     "success": False,
-                    "message": f"Installation script not found at {install_script}"
+                    "message": "Invalid dataset_name. It cannot be '.' or '..', contain slashes, and must consist of alphanumeric characters, underscore, dot, or hyphen."
                 }
             
-            # Sanitize dataset_name to prevent shell injection in the script
-            import re
-            if not re.match(r'^[a-zA-Z0-9_.-]+$', dataset_name):
-                return {
-                    "success": False,
-                    "message": "Invalid dataset_name. Only alphanumeric characters, underscore, dot, and hyphen are allowed."
-                }
+            # Create pre-commit hook content directly (embedded script)
+            # This script queues changed files for documentation updates
+            hook_content = '''#!/bin/bash
+# Code Query pre-commit hook - auto-generated
+# This hook queues changed files for documentation updates
+set -euo pipefail
+
+# Get the dataset name from config
+CONFIG_FILE=".code-query/config.json"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "⚠️  Code Query: No config file found. Skipping documentation queue."
+    exit 0
+fi
+
+# Validate dataset name from config (prevent injection)
+DATASET_NAME=$(jq -r '.mainDatasetName // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+if ! [[ "$DATASET_NAME" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    echo "⚠️  Code Query: Invalid dataset name in config. Skipping."
+    exit 0
+fi
+
+# Queue changed files
+CHANGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+if [ -z "$CHANGED_FILES" ]; then
+    exit 0
+fi
+
+# Create queue file
+QUEUE_FILE=".code-query/doc-queue.txt"
+mkdir -p .code-query
+
+# Add files to queue (one per line, no duplicates)
+echo "$CHANGED_FILES" | while read -r file; do
+    if [ -n "$file" ] && ! grep -Fxq "$file" "$QUEUE_FILE" 2>/dev/null; then
+        echo "$file" >> "$QUEUE_FILE"
+    fi
+done
+
+FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l)
+echo "📝 Code Query: Queued $FILE_COUNT file(s) for documentation update."
+echo "   Run 'code-query document_directory' to process the queue."
+
+exit 0
+'''
             
-            # Run the install script
-            try:
-                result = subprocess.run(
-                    ["bash", install_script, dataset_name],
-                    cwd=self.cwd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=30
-                )
+            # Write hook file
+            hooks_dir = os.path.join(actual_git_dir, "hooks")
+            os.makedirs(hooks_dir, exist_ok=True)
+            hook_path = os.path.join(hooks_dir, "pre-commit")
+            
+            # Check if hook already exists
+            hook_exists = os.path.exists(hook_path)
+            if hook_exists:
+                # Read existing hook
+                with open(hook_path, 'r') as f:
+                    existing_content = f.read()
                 
-                return {
-                    "success": True,
-                    "message": f"Successfully installed pre-commit hook for dataset '{dataset_name}'",
-                    "details": result.stdout,
-                    "hook_path": os.path.join(actual_git_dir, "hooks", "pre-commit"),
-                    "next_steps": [
-                        "The pre-commit hook will now queue changed files for documentation updates",
-                        "Use 'git doc-update' to process the queue and update documentation"
-                    ]
-                }
-                
-            except subprocess.CalledProcessError as e:
-                return {
-                    "success": False,
-                    "message": f"Failed to install pre-commit hook: {e.stderr}"
-                }
-            except subprocess.TimeoutExpired:
-                return {
-                    "success": False,
-                    "message": "Installation script timed out after 30 seconds"
-                }
+                if "Code Query pre-commit hook" in existing_content:
+                    return {
+                        "success": True,
+                        "message": "Pre-commit hook already installed",
+                        "hook_path": hook_path
+                    }
+                else:
+                    # Backup existing hook
+                    import shutil
+                    backup_path = f"{hook_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                    shutil.copy2(hook_path, backup_path)
+                    
+                    # Append to existing hook
+                    with open(hook_path, 'a') as f:
+                        f.write("\n\n# Code Query section\n")
+                        f.write(hook_content.replace('#!/bin/bash\n', ''))  # Remove shebang for append
+                    
+                    message = f"Appended to existing pre-commit hook (backup: {backup_path})"
+            else:
+                # Create new hook
+                with open(hook_path, 'w') as f:
+                    f.write(hook_content)
+                message = f"Successfully installed pre-commit hook for dataset '{dataset_name}'"
+            
+            # Make executable
+            os.chmod(hook_path, 0o755)
+            
+            return {
+                "success": True,
+                "message": message,
+                "hook_path": hook_path,
+                "next_steps": [
+                    "The pre-commit hook will now queue changed files for documentation updates",
+                    "Review queued files in .code-query/doc-queue.txt",
+                    "Use code-query tools to process the queue and update documentation"
+                ]
+            }
                 
         except Exception as e:
             return {
@@ -1297,18 +1438,23 @@ Would you like me to provide the file batches for you to process?
                         "message": "No main dataset specified and couldn't find one in config."
                     }
             
-            # Validate main_dataset to prevent shell injection
-            import re
-            if not re.match(r'^[a-zA-Z0-9_.-]+$', main_dataset):
+            # Validate main_dataset to prevent shell injection and path traversal
+            if not self._is_valid_dataset_name(main_dataset):
                 return {
                     "success": False,
-                    "message": "Invalid main_dataset. Only alphanumeric characters, underscore, dot, and hyphen are allowed."
+                    "message": "Invalid main_dataset. It cannot be '.' or '..', contain slashes, and must consist of alphanumeric characters, underscore, dot, or hyphen."
                 }
             
-            # Create post-merge hook script
-            post_merge_hook = f"""#!/bin/bash
-# Code Query MCP Post-merge Hook
+            # Create post-merge hook script with improved security
+            hook_content = '''#!/bin/bash
+# Code Query post-merge hook - auto-generated
 # This hook syncs documentation from worktree datasets back to main
+set -euo pipefail
+
+# Only run on successful merge (not during merge conflict)
+if [ -f .git/MERGE_HEAD ]; then
+    exit 0
+fi
 
 # Check if jq is installed
 if ! command -v jq &> /dev/null; then
@@ -1317,57 +1463,49 @@ if ! command -v jq &> /dev/null; then
     exit 0
 fi
 
-# Get the main branch name
-MAIN_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main")
-
 # Get current dataset from config
 CONFIG_FILE=".code-query/config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
     exit 0
 fi
 
-CURRENT_DATASET=$(jq -r '.datasetName // empty' "$CONFIG_FILE" 2>/dev/null)
-if [ -z "$CURRENT_DATASET" ]; then
+# Read and validate dataset name from config to prevent injection
+CURRENT_DATASET=$(jq -r '.mainDatasetName // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+if ! [[ "$CURRENT_DATASET" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    echo "⚠️  Code Query: Invalid dataset name in config. Skipping."
     exit 0
 fi
 
-# Main dataset for this repository
-# Use single quotes to prevent shell expansion
-MAIN_DATASET='{main_dataset}'
-
-# Skip if we're already on the main dataset
-if [ "$CURRENT_DATASET" = "$MAIN_DATASET" ]; then
-    exit 0
-fi
-
-# Check if we just merged from the main branch
-MERGED_FROM=$(git reflog -1 | grep -o "merge [^:]*" | cut -d' ' -f2)
-if [ -n "$MERGED_FROM" ] && [[ "$MERGED_FROM" == *"$MAIN_BRANCH"* ]]; then
-    echo "📄 Code Query: Detected merge from main branch ($MAIN_BRANCH)"
-    echo "   Syncing documentation from worktree dataset '$CURRENT_DATASET' to main dataset '$MAIN_DATASET'"
+# Check if this is a worktree dataset
+if [[ "$CURRENT_DATASET" == *"__wt_"* ]]; then
+    # Extract main dataset name (everything before __wt_)
+    # Fixed variable expansion and added quotes for safety
+    MAIN_DATASET="${CURRENT_DATASET%%__wt_*}"
     
-    # Get list of changed files in the merge
-    CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD)
-    
-    if [ -n "$CHANGED_FILES" ]; then
-        # Build a JSON array of files to prevent prompt injection
-        FILE_LIST_JSON=$(echo "$CHANGED_FILES" | jq -R . | jq -s .)
-
-        if [ -z "$FILE_LIST_JSON" ] || [ "$FILE_LIST_JSON" = "[]" ]; then
-            echo "   No valid files to sync."
-            exit 0
-        fi
-
-        echo "   Files to sync: $FILE_LIST_JSON"
-        echo ""
-        
-        # Use Claude to sync the files
-        claude --print "Use code-query MCP to copy documentation for files in the JSON array $FILE_LIST_JSON from dataset '$CURRENT_DATASET' to dataset '$MAIN_DATASET'"
+    # Validate the extracted main dataset name
+    if ! [[ "$MAIN_DATASET" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+        echo "⚠️  Code Query: Invalid main dataset name. Skipping."
+        exit 0
     fi
+    
+    # Get merge base and head for sync
+    MERGE_BASE=$(git merge-base HEAD ORIG_HEAD 2>/dev/null || echo "")
+    if [ -z "$MERGE_BASE" ]; then
+        exit 0
+    fi
+    
+    echo "🔄 Code Query: Post-merge sync opportunity detected"
+    echo "   From worktree dataset: $CURRENT_DATASET"
+    echo "   To main dataset: $MAIN_DATASET"
+    echo ""
+    echo "   To sync changes, run:"
+    echo "   code-query:sync_dataset source_dataset='$CURRENT_DATASET' target_dataset='$MAIN_DATASET' source_ref='HEAD' target_ref='$MERGE_BASE'"
+    echo ""
+    echo "   This will update the main dataset with changes from this worktree."
 fi
 
 exit 0
-"""
+'''
             
             # Write post-merge hook
             hooks_dir = os.path.join(actual_git_dir, "hooks")
@@ -1375,32 +1513,47 @@ exit 0
             hook_path = os.path.join(hooks_dir, "post-merge")
             
             # Check if hook already exists
-            if os.path.exists(hook_path):
+            hook_exists = os.path.exists(hook_path)
+            if hook_exists:
+                # Read existing hook
                 with open(hook_path, 'r') as f:
                     existing_content = f.read()
-                    if "Code Query MCP Post-merge Hook" not in existing_content:
-                        return {
-                            "success": False,
-                            "message": "A post-merge hook already exists. Please manually integrate or remove it first."
-                        }
-            
-            # Write the hook
-            with open(hook_path, 'w') as f:
-                f.write(post_merge_hook)
+                
+                if "Code Query post-merge hook" in existing_content:
+                    return {
+                        "success": True,
+                        "message": "Post-merge hook already installed",
+                        "hook_path": hook_path
+                    }
+                else:
+                    # Backup existing hook
+                    import shutil
+                    backup_path = f"{hook_path}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                    shutil.copy2(hook_path, backup_path)
+                    
+                    # Append to existing hook
+                    with open(hook_path, 'a') as f:
+                        f.write("\n\n# Code Query section\n")
+                        f.write(hook_content.replace('#!/bin/bash\n', ''))  # Remove shebang for append
+                    
+                    message = f"Appended to existing post-merge hook (backup: {backup_path})"
+            else:
+                # Create new hook
+                with open(hook_path, 'w') as f:
+                    f.write(hook_content)
+                message = f"Successfully installed post-merge hook"
             
             # Make hook executable
             os.chmod(hook_path, 0o755)
             
             return {
                 "success": True,
-                "message": f"Successfully installed post-merge hook for main dataset '{main_dataset}'",
-                "details": {
-                    "hook_path": hook_path,
-                    "main_dataset": main_dataset
-                },
+                "message": message,
+                "hook_path": hook_path,
                 "next_steps": [
-                    "The post-merge hook will sync changes from worktree datasets back to main",
-                    "This happens automatically when merging from main/master branches"
+                    "The post-merge hook will detect when you merge in a worktree",
+                    "It will suggest the sync_dataset command to run",
+                    "This helps keep main dataset updated with worktree changes"
                 ]
             }
             
@@ -1414,6 +1567,15 @@ exit 0
         """Syncs file records between datasets based on git diff."""
         if not self.db:
             return {"success": False, "message": "Database not connected"}
+        
+        # CRITICAL FIX: Add validation for git refs to prevent argument injection
+        if source_ref.startswith('-') or target_ref.startswith('-'):
+            return {"success": False, "message": "Invalid ref format. Refs cannot start with a dash."}
+        
+        # Ensure refs only contain safe characters for git
+        ref_pattern = re.compile(r"^[a-zA-Z0-9_./-]+$")
+        if not ref_pattern.match(source_ref) or not ref_pattern.match(target_ref):
+            return {"success": False, "message": "Invalid ref format. Contains disallowed characters."}
         
         try:
             # 1. Get changed files using git diff with status
