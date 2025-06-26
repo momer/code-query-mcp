@@ -1214,7 +1214,7 @@ Would you like me to provide the file batches for you to process?
             if wt_info and wt_info['is_worktree']:
                 config_data['worktreeInfo'] = {
                     'branch': wt_info['branch'],
-                    'mainDataset': main_dataset,
+                    'mainDatasetName': main_dataset,
                     'isWorktree': True,
                     'datasetNote': f"This worktree uses dataset '{actual_dataset_name}' which is isolated from the main dataset"
                 }
@@ -1539,7 +1539,7 @@ exit 0
                     try:
                         with open(config_path, 'r') as f:
                             config_data = json.load(f)
-                            main_dataset = config_data.get("datasetName")
+                            main_dataset = config_data.get("mainDatasetName")
                     except Exception:
                         pass
                 
@@ -1906,8 +1906,8 @@ exit 0
                 try:
                     with open(os.path.join(self.cwd, ".code-query", "config.json"), 'r') as f:
                         config_data = json.load(f)
-                        if config_data.get("datasetName"):
-                            dataset_name_to_use = config_data["datasetName"]
+                        if config_data.get("mainDatasetName"):
+                            dataset_name_to_use = config_data["mainDatasetName"]
                 except Exception:
                     pass
             
@@ -2027,7 +2027,7 @@ exit 0
                     "has_datasets": has_datasets,
                     "dataset_count": len(existing_datasets),
                     "existing_datasets": existing_datasets if has_datasets else [],
-                    "config_dataset_name": config_data.get("datasetName") if config_data else None
+                    "config_dataset_name": config_data.get("mainDatasetName") if config_data else None
                 },
                 "setup_needed": len(setup_steps) > 0,
                 "setup_steps": setup_steps
