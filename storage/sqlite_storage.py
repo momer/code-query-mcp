@@ -405,11 +405,12 @@ class CodeQueryServer:
         
         if cursor.fetchone():
             # Use FTS5 for search
-            # Escape special FTS5 characters by wrapping each term in quotes
-            # Split on spaces and quote each term to handle special characters
-            terms = query.split()
-            escaped_terms = [f'"{term}"' for term in terms]
-            fts_query = ' '.join(escaped_terms)
+            # Sanitize query for FTS5 by escaping special characters
+            import re
+            # Remove potentially problematic characters and escape quotes
+            fts_query = re.sub(r'[^\w\s".-]', ' ', query)
+            fts_query = fts_query.replace('"', '""')  # Escape quotes
+            fts_query = fts_query.strip()
             
             cursor = self.db.execute("""
                 SELECT DISTINCT f.filepath, f.filename, f.overview, f.ddd_context,
@@ -474,12 +475,12 @@ class CodeQueryServer:
         
         if cursor.fetchone():
             # Use FTS5 for search with focus on full_content
-            # Use regex to correctly handle quoted phrases and individual terms
+            # Sanitize query for FTS5 by escaping special characters
             import re
-            terms = re.findall(r'"[^"]+"|\\S+', query)
-            # Sanitize by ensuring non-quoted terms are wrapped in quotes for the query
-            sanitized_terms = [term if term.startswith('"') else f'"{term}"' for term in terms]
-            fts_query = ' '.join(sanitized_terms)
+            # Remove potentially problematic characters and escape quotes
+            fts_query = re.sub(r'[^\w\s".-]', ' ', query)
+            fts_query = fts_query.replace('"', '""')  # Escape quotes
+            fts_query = fts_query.strip()
             
             cursor = self.db.execute("""
                 SELECT f.filepath, f.filename, f.overview, f.ddd_context,
