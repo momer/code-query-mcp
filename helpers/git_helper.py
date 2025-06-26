@@ -189,3 +189,54 @@ def get_worktree_info(cwd: str = None) -> dict | None:
         "branch": git_info["branch_name"],
         "sanitized_branch": git_info["sanitized_branch_name"]
     }
+
+
+def get_current_commit(cwd: str = None) -> str | None:
+    """
+    Get the current git commit hash.
+    
+    Returns the current HEAD commit hash, or None if not in a git repo.
+    """
+    if cwd is None:
+        cwd = os.getcwd()
+    
+    try:
+        commit_hash = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], 
+            cwd=cwd, 
+            text=True, 
+            stderr=subprocess.PIPE
+        ).strip()
+        return commit_hash
+    except subprocess.CalledProcessError:
+        return None
+
+
+def get_changed_files_since_commit(commit_hash: str, cwd: str = None) -> list[str]:
+    """
+    Get list of files changed since the given commit.
+    
+    Returns a list of file paths that have been modified, added, or deleted
+    since the specified commit.
+    """
+    if cwd is None:
+        cwd = os.getcwd()
+    
+    if not commit_hash:
+        return []
+    
+    try:
+        # Use git diff to find changed files
+        result = subprocess.check_output(
+            ["git", "diff", "--name-only", f"{commit_hash}..HEAD"], 
+            cwd=cwd, 
+            text=True, 
+            stderr=subprocess.PIPE
+        ).strip()
+        
+        if not result:
+            return []
+        
+        return [line.strip() for line in result.split('\n') if line.strip()]
+    except subprocess.CalledProcessError:
+        return []

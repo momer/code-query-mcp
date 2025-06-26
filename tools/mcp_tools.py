@@ -423,5 +423,59 @@ Examples:
                     }
                 }
             }
+        ),
+        Tool(
+            name="find_files_needing_catchup",
+            description="Find files that have changed since they were last documented",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset to check for files needing catchup. Use get_project_config first to check for active dataset, then list_datasets if dataset name is unknown."
+                    }
+                },
+                "required": ["dataset_name"]
+            }
+        ),
+        Tool(
+            name="backport_commit_to_file",
+            description="Associate a commit hash with a file that was documented without commit tracking",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset containing the file. Use get_project_config first to check for active dataset, then list_datasets if dataset name is unknown."
+                    },
+                    "filepath": {
+                        "type": "string",
+                        "description": "Full path to the file to update"
+                    },
+                    "commit_hash": {
+                        "type": "string",
+                        "description": "Git commit hash to associate with the file"
+                    }
+                },
+                "required": ["dataset_name", "filepath", "commit_hash"]
+            }
+        ),
+        Tool(
+            name="bulk_backport_commits",
+            description="Backport commit hash to all files in a dataset that don't have commit tracking",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset to update. Use get_project_config first to check for active dataset, then list_datasets if dataset name is unknown."
+                    },
+                    "commit_hash": {
+                        "type": "string",
+                        "description": "Git commit hash to associate with files (optional - uses current HEAD if not provided)"
+                    }
+                },
+                "required": ["dataset_name"]
+            }
         )
     ]

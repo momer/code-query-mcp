@@ -10,7 +10,7 @@ import subprocess
 import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from helpers.git_helper import get_actual_git_dir
+from helpers.git_helper import get_actual_git_dir, get_current_commit, get_changed_files_since_commit
 
 
 # Global database connection
@@ -107,6 +107,8 @@ class CodeQueryServer:
                 constants TEXT,
                 dependencies TEXT,
                 other_notes TEXT,
+                documented_at_commit TEXT,
+                documented_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (dataset_id, filepath)
             )
         """)
@@ -386,6 +388,27 @@ class CodeQueryServer:
                 logging.info("Successfully added dataset_type column")
             except sqlite3.OperationalError as e:
                 logging.warning(f"Could not add dataset_type column: {e}")
+        
+        # Add commit tracking columns to files table if missing
+        cursor = self.db.execute("PRAGMA table_info(files)")
+        file_columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'documented_at_commit' not in file_columns:
+            logging.info("Adding commit tracking columns to files table...")
+            try:
+                self.db.execute("""
+                    ALTER TABLE files 
+                    ADD COLUMN documented_at_commit TEXT
+                """)
+                
+                self.db.execute("""
+                    ALTER TABLE files 
+                    ADD COLUMN documented_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                """)
+                
+                logging.info("Successfully added commit tracking columns to files table")
+            except sqlite3.OperationalError as e:
+                logging.warning(f"Could not add commit tracking columns: {e}")
     
     def import_data(self, dataset_name: str, directory: str, replace: bool = False) -> Dict[str, Any]:
         """Import JSON files from directory into named dataset."""
@@ -927,12 +950,16 @@ Would you like me to provide the file batches for you to process?
             }
         
         try:
+            # Get current commit hash for tracking
+            current_commit = get_current_commit(self.cwd)
+            
             self.db.execute("""
                 INSERT OR REPLACE INTO files (
                     dataset_id, filepath, filename, overview, ddd_context,
                     functions, exports, imports, types_interfaces_classes,
-                    constants, dependencies, other_notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    constants, dependencies, other_notes, documented_at_commit,
+                    documented_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """, (
                 dataset_name,
                 filepath,
@@ -945,7 +972,8 @@ Would you like me to provide the file batches for you to process?
                 json.dumps(types_interfaces_classes or {}),
                 json.dumps(constants or {}),
                 json.dumps(dependencies or []),
-                json.dumps(other_notes or [])
+                json.dumps(other_notes or []),
+                current_commit
             ))
             
             # Update dataset metadata file count
@@ -2164,4 +2192,206 @@ exit 0
             return {
                 "success": False,
                 "message": f"Error analyzing setup requirements: {str(e)}"
+            }
+    
+    def find_files_needing_catchup(self, dataset_name: str) -> Dict[str, Any]:
+        """
+        Find files that have changed since they were last documented.
+        
+        Returns files that need to be re-documented due to git changes.
+        """
+        if not self.db:
+            return {"success": False, "message": "Database not connected"}
+        
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return {
+                "success": False,
+                "message": "Invalid dataset name"
+            }
+        
+        try:
+            # Get all documented files with their last documented commit
+            cursor = self.db.execute("""
+                SELECT filepath, documented_at_commit, documented_at
+                FROM files 
+                WHERE dataset_id = ? AND documented_at_commit IS NOT NULL
+                ORDER BY filepath
+            """, (dataset_name,))
+            
+            documented_files = cursor.fetchall()
+            
+            if not documented_files:
+                return {
+                    "success": True,
+                    "message": "No files found with commit tracking",
+                    "files_needing_catchup": [],
+                    "total_files": 0
+                }
+            
+            files_needing_catchup = []
+            current_commit = get_current_commit(self.cwd)
+            
+            for file_row in documented_files:
+                filepath = file_row['filepath']
+                last_commit = file_row['documented_at_commit']
+                documented_at = file_row['documented_at']
+                
+                if not last_commit:
+                    # File was documented without commit tracking (legacy)
+                    files_needing_catchup.append({
+                        "filepath": filepath,
+                        "reason": "no_commit_tracking",
+                        "last_documented_commit": None,
+                        "documented_at": documented_at,
+                        "current_commit": current_commit
+                    })
+                    continue
+                
+                # Check if file has changed since last documentation
+                changed_files = get_changed_files_since_commit(last_commit, self.cwd)
+                
+                if filepath in changed_files:
+                    files_needing_catchup.append({
+                        "filepath": filepath,
+                        "reason": "file_changed",
+                        "last_documented_commit": last_commit,
+                        "documented_at": documented_at,
+                        "current_commit": current_commit
+                    })
+            
+            return {
+                "success": True,
+                "message": f"Found {len(files_needing_catchup)} files needing catchup out of {len(documented_files)} total documented files",
+                "files_needing_catchup": files_needing_catchup,
+                "total_documented_files": len(documented_files),
+                "current_commit": current_commit
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error finding files needing catchup: {str(e)}"
+            }
+    
+    def backport_commit_to_file(self, dataset_name: str, filepath: str, commit_hash: str) -> Dict[str, Any]:
+        """
+        Associate a commit hash with a file that was documented without commit tracking.
+        
+        This is useful for legacy files that were documented before commit tracking was implemented.
+        """
+        if not self.db:
+            return {"success": False, "message": "Database not connected"}
+        
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return {
+                "success": False,
+                "message": "Invalid dataset name"
+            }
+        
+        try:
+            # Check if file exists in dataset
+            cursor = self.db.execute("""
+                SELECT filepath, documented_at_commit 
+                FROM files 
+                WHERE dataset_id = ? AND filepath = ?
+            """, (dataset_name, filepath))
+            
+            file_row = cursor.fetchone()
+            if not file_row:
+                return {
+                    "success": False,
+                    "message": f"File '{filepath}' not found in dataset '{dataset_name}'"
+                }
+            
+            # Update the commit hash
+            self.db.execute("""
+                UPDATE files 
+                SET documented_at_commit = ?
+                WHERE dataset_id = ? AND filepath = ?
+            """, (commit_hash, dataset_name, filepath))
+            
+            return {
+                "success": True,
+                "message": f"Successfully associated commit {commit_hash[:8]} with file '{filepath}'",
+                "filepath": filepath,
+                "commit_hash": commit_hash,
+                "previous_commit": file_row['documented_at_commit']
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error backporting commit to file: {str(e)}"
+            }
+    
+    def bulk_backport_commits(self, dataset_name: str, commit_hash: str = None) -> Dict[str, Any]:
+        """
+        Backport commit hash to all files in dataset that don't have commit tracking.
+        
+        If commit_hash is None, uses current HEAD commit.
+        """
+        if not self.db:
+            return {"success": False, "message": "Database not connected"}
+        
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return {
+                "success": False,
+                "message": "Invalid dataset name"
+            }
+        
+        try:
+            # Use current commit if none provided
+            if not commit_hash:
+                commit_hash = get_current_commit(self.cwd)
+                if not commit_hash:
+                    return {
+                        "success": False,
+                        "message": "Could not determine current commit and no commit hash provided"
+                    }
+            
+            # Find files without commit tracking
+            cursor = self.db.execute("""
+                SELECT filepath 
+                FROM files 
+                WHERE dataset_id = ? AND documented_at_commit IS NULL
+            """, (dataset_name,))
+            
+            files_without_commits = cursor.fetchall()
+            
+            if not files_without_commits:
+                return {
+                    "success": True,
+                    "message": "No files found without commit tracking",
+                    "updated_files": [],
+                    "commit_hash": commit_hash
+                }
+            
+            # Update all files without commit tracking
+            updated_files = []
+            for file_row in files_without_commits:
+                filepath = file_row['filepath']
+                
+                self.db.execute("""
+                    UPDATE files 
+                    SET documented_at_commit = ?
+                    WHERE dataset_id = ? AND filepath = ?
+                """, (commit_hash, dataset_name, filepath))
+                
+                updated_files.append(filepath)
+            
+            return {
+                "success": True,
+                "message": f"Successfully backported commit {commit_hash[:8]} to {len(updated_files)} files",
+                "updated_files": updated_files,
+                "commit_hash": commit_hash,
+                "total_updated": len(updated_files)
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error bulk backporting commits: {str(e)}"
             }

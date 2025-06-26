@@ -194,6 +194,35 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         result = query_server.cleanup_datasets(dry_run)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
+    elif name == "find_files_needing_catchup":
+        dataset_name = arguments.get("dataset_name")
+        if not dataset_name:
+            return [TextContent(type="text", text="dataset_name is required")]
+        
+        result = query_server.find_files_needing_catchup(dataset_name)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
+    elif name == "backport_commit_to_file":
+        dataset_name = arguments.get("dataset_name")
+        filepath = arguments.get("filepath")
+        commit_hash = arguments.get("commit_hash")
+        
+        if not all([dataset_name, filepath, commit_hash]):
+            return [TextContent(type="text", text="dataset_name, filepath, and commit_hash are required")]
+        
+        result = query_server.backport_commit_to_file(dataset_name, filepath, commit_hash)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
+    elif name == "bulk_backport_commits":
+        dataset_name = arguments.get("dataset_name")
+        commit_hash = arguments.get("commit_hash")  # Optional
+        
+        if not dataset_name:
+            return [TextContent(type="text", text="dataset_name is required")]
+        
+        result = query_server.bulk_backport_commits(dataset_name, commit_hash)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
