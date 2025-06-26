@@ -1,0 +1,1 @@
+"""Storage functions for Code Query MCP Server."""

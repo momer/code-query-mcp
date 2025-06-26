@@ -1,0 +1,368 @@
+"""MCP tool definitions for Code Query MCP Server."""
+
+from typing import List
+from mcp.types import Tool
+
+
+def get_tools() -> List[Tool]:
+    """Return all available MCP tools."""
+    return [
+        Tool(
+            name="import_data",
+            description="Import JSON files from directory into named dataset",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Name for this dataset"
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": "Relative directory path containing JSON files"
+                    },
+                    "replace": {
+                        "type": "boolean",
+                        "description": "Replace existing dataset if it exists",
+                        "default": False
+                    }
+                },
+                "required": ["dataset_name", "directory"]
+            }
+        ),
+        Tool(
+            name="recommend_setup",
+            description="Check your project setup and get recommendations for Code Query MCP. This tool only analyzes your current state - it does NOT make any changes. It will: 1) Check for existing datasets that match your project, 2) Detect if configuration files exist, 3) Check git hook status, and 4) Recommend next steps. Use this to see what setup is needed without modifying anything.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_name": {
+                        "type": "string",
+                        "description": "Name for the project (auto-detected if not provided)"
+                    },
+                    "source_directory": {
+                        "type": "string",
+                        "description": "Directory to document (auto-detected if not provided)"
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
+            name="search_files",
+            description="Search files in dataset by query string. Use list_datasets first if you don't know the dataset name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    },
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset to search in. Use list_datasets tool if unknown."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return",
+                        "default": 10
+                    }
+                },
+                "required": ["query", "dataset_name"]
+            }
+        ),
+        Tool(
+            name="get_file",
+            description="Get complete details for a specific file. Supports partial path matching (e.g., 'login.ts' finds 'src/auth/login.ts'). Use list_datasets first if you don't know the dataset name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filepath": {
+                        "type": "string",
+                        "description": "Full or partial path to the file. Use % for wildcards."
+                    },
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset containing the file. Use list_datasets tool if unknown."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results for partial matches",
+                        "default": 10
+                    }
+                },
+                "required": ["filepath", "dataset_name"]
+            }
+        ),
+        Tool(
+            name="list_domains",
+            description="List all unique DDD context domains in dataset. Use list_datasets first if you don't know the dataset name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset to analyze. Use list_datasets tool if unknown."
+                    }
+                },
+                "required": ["dataset_name"]
+            }
+        ),
+        Tool(
+            name="list_datasets",
+            description="List all loaded datasets with their names, sources, and file counts. Use this when you need to discover available dataset names.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
+            name="get_status",
+            description="Get current database status",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
+            name="clear_dataset",
+            description="Clear a specific dataset. Use list_datasets to see available datasets.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset to clear. Use list_datasets tool to see available options."
+                    }
+                },
+                "required": ["dataset_name"]
+            }
+        ),
+        Tool(
+            name="document_directory",
+            description="Generate orchestration instructions for documenting a directory of code files",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Name for this dataset"
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": "Relative directory path to document"
+                    },
+                    "exclude_patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Patterns to exclude (e.g., '*.test.js', 'temp/*')"
+                    },
+                    "batch_size": {
+                        "type": "integer",
+                        "description": "Number of files per agent batch",
+                        "default": 20
+                    }
+                },
+                "required": ["dataset_name", "directory"]
+            }
+        ),
+        Tool(
+            name="insert_file_documentation",
+            description="Insert analyzed file documentation into dataset (used by agents)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset to insert into. Use list_datasets tool if unknown."
+                    },
+                    "filepath": {
+                        "type": "string",
+                        "description": "Full file path"
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "File name"
+                    },
+                    "overview": {
+                        "type": "string",
+                        "description": "Brief file overview"
+                    },
+                    "functions": {
+                        "type": "object",
+                        "description": "Functions with their details"
+                    },
+                    "exports": {
+                        "type": "object",
+                        "description": "Exported items"
+                    },
+                    "imports": {
+                        "type": "object",
+                        "description": "Imported items"
+                    },
+                    "types_interfaces_classes": {
+                        "type": "object",
+                        "description": "Type definitions"
+                    },
+                    "constants": {
+                        "type": "object",
+                        "description": "Constant definitions"
+                    },
+                    "ddd_context": {
+                        "type": "string",
+                        "description": "DDD domain context"
+                    },
+                    "dependencies": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "External dependencies"
+                    },
+                    "other_notes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Additional notes"
+                    }
+                },
+                "required": ["dataset_name", "filepath", "filename", "overview"]
+            }
+        ),
+        Tool(
+            name="update_file_documentation",
+            description="Update existing file documentation in dataset. Only updates provided fields.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset containing the file. Use list_datasets tool if unknown."
+                    },
+                    "filepath": {
+                        "type": "string",
+                        "description": "Full file path to update"
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Updated file name (optional)"
+                    },
+                    "overview": {
+                        "type": "string",
+                        "description": "Updated file overview (optional)"
+                    },
+                    "functions": {
+                        "type": "object",
+                        "description": "Updated functions (optional)"
+                    },
+                    "exports": {
+                        "type": "object",
+                        "description": "Updated exports (optional)"
+                    },
+                    "imports": {
+                        "type": "object",
+                        "description": "Updated imports (optional)"
+                    },
+                    "types_interfaces_classes": {
+                        "type": "object",
+                        "description": "Updated type definitions (optional)"
+                    },
+                    "constants": {
+                        "type": "object",
+                        "description": "Updated constants (optional)"
+                    },
+                    "ddd_context": {
+                        "type": "string",
+                        "description": "Updated DDD context (optional)"
+                    },
+                    "dependencies": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Updated dependencies (optional)"
+                    },
+                    "other_notes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Updated notes (optional)"
+                    }
+                },
+                "required": ["dataset_name", "filepath"]
+            }
+        ),
+        Tool(
+            name="get_project_config",
+            description="Get comprehensive project configuration including dataset status, git hooks, and setup completeness. This tool helps understand what setup steps have been completed and what remains to be done.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        Tool(
+            name="install_pre_commit_hook",
+            description="Install pre-commit hook for automatic documentation update queuing",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset name to use for this project"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Hook mode: 'queue' (default) queues files for manual update",
+                        "enum": ["queue"],
+                        "default": "queue"
+                    }
+                },
+                "required": ["dataset_name"]
+            }
+        ),
+        Tool(
+            name="create_project_config",
+            description="Create or update code-query project configuration file (.code-query/config.json)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset name for this project"
+                    },
+                    "exclude_patterns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Patterns to exclude (e.g., '*.test.js', 'node_modules/*'). Defaults to common exclusions if not provided."
+                    }
+                },
+                "required": ["dataset_name"]
+            }
+        ),
+        Tool(
+            name="fork_dataset",
+            description="Fork (copy) a dataset to a new name. Useful for git worktrees where you want to work on the same codebase with different branches. Use list_datasets first if you don't know the source dataset name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_dataset": {
+                        "type": "string",
+                        "description": "Source dataset to copy from. Use list_datasets tool if unknown."
+                    },
+                    "target_dataset": {
+                        "type": "string",
+                        "description": "New dataset name to create"
+                    }
+                },
+                "required": ["source_dataset", "target_dataset"]
+            }
+        ),
+        Tool(
+            name="install_post_merge_hook",
+            description="Install post-merge hook for syncing worktree changes back to main dataset",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "main_dataset": {
+                        "type": "string",
+                        "description": "Main dataset name to sync to (defaults to config datasetName)"
+                    }
+                },
+                "required": []
+            }
+        )
+    ]
