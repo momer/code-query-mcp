@@ -181,6 +181,19 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         result = query_server.install_post_merge_hook(main_dataset)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
+    elif name == "sync_dataset":
+        source_dataset = arguments.get("source_dataset", "")
+        target_dataset = arguments.get("target_dataset", "")
+        source_ref = arguments.get("source_ref", "")
+        target_ref = arguments.get("target_ref", "")
+        result = query_server.sync_dataset(source_dataset, target_dataset, source_ref, target_ref)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
+    elif name == "cleanup_datasets":
+        dry_run = arguments.get("dry_run", True)
+        result = query_server.cleanup_datasets(dry_run)
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

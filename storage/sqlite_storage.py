@@ -326,6 +326,32 @@ class CodeQueryServer:
             
         except sqlite3.OperationalError as e:
             logging.warning(f"Could not create FTS5 table: {e}")
+        
+        # Check and migrate dataset_metadata table to add parent tracking
+        cursor = self.db.execute("PRAGMA table_info(dataset_metadata)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'parent_dataset_id' not in columns:
+            logging.info("Migrating dataset_metadata schema to support parent tracking...")
+            
+            # Add new columns for worktree tracking
+            try:
+                self.db.execute("""
+                    ALTER TABLE dataset_metadata 
+                    ADD COLUMN parent_dataset_id TEXT
+                """)
+                
+                self.db.execute("""
+                    ALTER TABLE dataset_metadata 
+                    ADD COLUMN source_branch TEXT
+                """)
+                
+                # No foreign key constraints can be added via ALTER TABLE in SQLite
+                # But we've documented the relationship in the schema
+                
+                logging.info("Successfully added parent tracking columns to dataset_metadata")
+            except sqlite3.OperationalError as e:
+                logging.warning(f"Could not add parent tracking columns: {e}")
     
     def import_data(self, dataset_name: str, directory: str, replace: bool = False) -> Dict[str, Any]:
         """Import JSON files from directory into named dataset."""
@@ -1072,16 +1098,37 @@ Would you like me to provide the file batches for you to process?
             
             files_copied = self.db.total_changes
             
+            # Detect if this is a worktree dataset by naming convention
+            is_worktree_dataset = "__wt_" in target_dataset
+            
+            # Get current branch if this is a worktree fork
+            source_branch = None
+            if is_worktree_dataset:
+                try:
+                    result = subprocess.run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=self.cwd,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                        timeout=5
+                    )
+                    source_branch = result.stdout.strip()
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    pass
+            
             # Create metadata entry for target dataset
             self.db.execute("""
                 INSERT INTO dataset_metadata 
-                (dataset_id, source_dir, files_count, loaded_at)
-                VALUES (?, ?, ?, ?)
+                (dataset_id, source_dir, files_count, loaded_at, parent_dataset_id, source_branch)
+                VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 target_dataset,
                 f"{source_metadata['source_dir']} (forked from {source_dataset})",
                 files_copied,
-                datetime.now()
+                datetime.now(),
+                source_dataset if is_worktree_dataset else None,
+                source_branch
             ))
             
             self.db.commit()
@@ -1318,6 +1365,187 @@ exit 0
             return {
                 "success": False,
                 "message": f"Error installing post-merge hook: {str(e)}"
+            }
+    
+    def sync_dataset(self, source_dataset: str, target_dataset: str, source_ref: str, target_ref: str) -> Dict[str, Any]:
+        """Syncs file records between datasets based on git diff."""
+        if not self.db:
+            return {"success": False, "message": "Database not connected"}
+        
+        try:
+            # 1. Get changed files using git diff
+            # Use target_ref...source_ref to find changes introduced by source
+            diff_command = ["git", "diff", "--name-only", f"{target_ref}...{source_ref}"]
+            result = subprocess.run(diff_command, capture_output=True, text=True, check=True, cwd=self.cwd)
+            changed_files = result.stdout.strip().split('\n')
+            
+            if not any(changed_files):
+                return {"success": True, "message": "No changes to sync"}
+            
+            # 2. Sync in transaction for atomicity
+            synced_count = 0
+            with self.db:  # Transaction context
+                for filepath in changed_files:
+                    if not filepath: 
+                        continue
+                        
+                    # 3. Fetch record from source dataset
+                    cursor = self.db.execute(
+                        "SELECT * FROM files WHERE dataset_id = ? AND filepath = ?",
+                        (source_dataset, filepath)
+                    )
+                    source_record = cursor.fetchone()
+                    
+                    if source_record:
+                        # 4. Insert or replace in target dataset
+                        columns = [key for key in source_record.keys() if key != 'dataset_id']
+                        placeholders = ', '.join(['?'] * (len(columns) + 1))
+                        values = [target_dataset] + [source_record[col] for col in columns]
+                        
+                        self.db.execute(f"""
+                            INSERT OR REPLACE INTO files (dataset_id, {', '.join(columns)})
+                            VALUES ({placeholders})
+                        """, tuple(values))
+                        synced_count += 1
+            
+            return {
+                "success": True,
+                "message": f"Synced {synced_count} files from '{source_dataset}' to '{target_dataset}'",
+                "files_checked": len(changed_files),
+                "files_synced": synced_count
+            }
+            
+        except subprocess.CalledProcessError as e:
+            return {"success": False, "message": f"Git diff failed: {e.stderr}"}
+        except Exception as e:
+            return {"success": False, "message": f"Sync failed: {str(e)}"}
+    
+    def cleanup_datasets(self, dry_run: bool = True) -> Dict[str, Any]:
+        """Find and remove orphaned datasets."""
+        try:
+            # 1. Get all active git branches (local and remote)
+            branches_raw = subprocess.check_output(
+                ["git", "branch", "-a"], 
+                text=True, 
+                cwd=self.cwd
+            ).strip()
+            
+            # Parse and sanitize branch names
+            active_branches = set()
+            for line in branches_raw.split('\n'):
+                branch = line.strip().replace('* ', '')
+                if '->' in branch:  # Skip symbolic refs
+                    continue
+                if branch.startswith('remotes/origin/'):
+                    branch = branch[len('remotes/origin/'):]
+                # Sanitize branch name same way as dataset naming
+                sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', branch)
+                active_branches.add(sanitized)
+            
+            # 2. Find worktree datasets (by naming pattern or metadata)
+            # First try new metadata approach
+            cursor = self.db.execute("""
+                SELECT dataset_id, source_branch 
+                FROM dataset_metadata 
+                WHERE source_branch IS NOT NULL
+            """)
+            metadata_datasets = cursor.fetchall()
+            
+            # Also check naming convention for backward compatibility
+            cursor = self.db.execute("""
+                SELECT dataset_id 
+                FROM dataset_metadata 
+                WHERE dataset_id LIKE '%__wt_%'
+            """)
+            pattern_datasets = cursor.fetchall()
+            
+            # 3. Identify orphans
+            orphans = []
+            
+            # Check metadata-based datasets
+            for row in metadata_datasets:
+                dataset_id = row['dataset_id']
+                source_branch = row['source_branch']
+                sanitized_branch = re.sub(r'[^a-zA-Z0-9_]', '_', source_branch)
+                if sanitized_branch not in active_branches:
+                    orphans.append({
+                        'dataset_id': dataset_id,
+                        'source_branch': source_branch,
+                        'detection_method': 'metadata'
+                    })
+            
+            # Check pattern-based datasets
+            for row in pattern_datasets:
+                dataset_id = row['dataset_id']
+                # Extract branch from naming pattern
+                match = re.search(r'__wt_(.+)$', dataset_id)
+                if match:
+                    branch_part = match.group(1)
+                    if branch_part not in active_branches:
+                        # Avoid duplicates
+                        if not any(o['dataset_id'] == dataset_id for o in orphans):
+                            orphans.append({
+                                'dataset_id': dataset_id,
+                                'inferred_branch': branch_part,
+                                'detection_method': 'pattern'
+                            })
+            
+            if not orphans:
+                return {
+                    "success": True,
+                    "message": "No orphaned datasets found",
+                    "orphans": []
+                }
+            
+            if dry_run:
+                return {
+                    "success": True,
+                    "message": f"Found {len(orphans)} orphaned datasets (dry run)",
+                    "orphans": orphans,
+                    "recommendation": "Run 'git fetch --prune' first to update remote branch info"
+                }
+            
+            # 4. Delete orphans
+            deleted_count = 0
+            errors = []
+            
+            with self.db:  # Transaction
+                for orphan in orphans:
+                    dataset_id = orphan['dataset_id']
+                    try:
+                        # Delete from files table
+                        self.db.execute("DELETE FROM files WHERE dataset_id = ?", (dataset_id,))
+                        # Delete from metadata
+                        self.db.execute("DELETE FROM dataset_metadata WHERE dataset_id = ?", (dataset_id,))
+                        deleted_count += 1
+                    except Exception as e:
+                        errors.append({
+                            'dataset_id': dataset_id,
+                            'error': str(e)
+                        })
+            
+            if errors:
+                return {
+                    "success": False,
+                    "message": f"Deleted {deleted_count} of {len(orphans)} datasets",
+                    "errors": errors
+                }
+            
+            return {
+                "success": True,
+                "message": f"Successfully deleted {deleted_count} orphaned datasets",
+                "deleted": orphans
+            }
+            
+        except subprocess.CalledProcessError as e:
+            return {
+                "success": False,
+                "message": f"Git command failed: {e.stderr}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Cleanup failed: {str(e)}"
             }
     
     def recommend_setup(self, project_name: str = None, source_directory: str = None) -> Dict[str, Any]:

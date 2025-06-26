@@ -364,5 +364,45 @@ def get_tools() -> List[Tool]:
                 },
                 "required": []
             }
+        ),
+        Tool(
+            name="sync_dataset",
+            description="Syncs documentation changes from a source dataset (e.g., feature branch) to a target dataset (e.g., main). Use after merging branches.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_dataset": {
+                        "type": "string",
+                        "description": "The dataset to sync changes from (e.g., 'project__wt_feature_branch')"
+                    },
+                    "target_dataset": {
+                        "type": "string", 
+                        "description": "The dataset to sync changes to (e.g., 'project_main')"
+                    },
+                    "source_ref": {
+                        "type": "string",
+                        "description": "Git ref (branch/commit) for source dataset"
+                    },
+                    "target_ref": {
+                        "type": "string",
+                        "description": "Git ref (branch/commit) for target dataset"
+                    }
+                },
+                "required": ["source_dataset", "target_dataset", "source_ref", "target_ref"]
+            }
+        ),
+        Tool(
+            name="cleanup_datasets",
+            description="Find and optionally remove orphaned datasets whose git branches no longer exist",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true, only list orphans without deleting. Defaults to true for safety.",
+                        "default": True
+                    }
+                }
+            }
         )
     ]
