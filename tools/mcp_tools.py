@@ -91,6 +91,43 @@ Examples:
             }
         ),
         Tool(
+            name="search",
+            description="""Unified search combining both metadata and full-content search for comprehensive code discovery. Returns results from both search types, with deduplication and clear categorization. This is the recommended search tool for most use cases as it provides complete coverage.
+
+IMPORTANT: This searches both metadata (overviews, function names, exports, imports) AND actual source code content. Perfect for comprehensive discovery when you're not sure whether to use metadata or content search.
+
+Use cases:
+- General code exploration and discovery
+- Finding files/functions when unsure of exact location
+- Comprehensive search across both documentation and implementation
+- Getting complete picture of where terms appear in the codebase
+
+Returns structured results with:
+- metadata_results: Files found through metadata search (overviews, function names, etc.)
+- content_results: Files found only through full-content search  
+- search_summary: Statistics about the search results
+- Automatic deduplication of files found in both searches""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query for unified search"
+                    },
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset to search in. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if unknown."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return per search type",
+                        "default": 10
+                    }
+                },
+                "required": ["query", "dataset_name"]
+            }
+        ),
+        Tool(
             name="search_full_content",
             description="""Search full file contents using FTS5 for comprehensive code search. This provides deep content search within actual source code files, complementing the metadata search provided by search_files. Returns snippets of actual code content where matches are found.
 

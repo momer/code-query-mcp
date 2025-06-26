@@ -531,6 +531,65 @@ class CodeQueryServer:
         
         return results
     
+    def search(self, query: str, dataset_name: str, limit: int = 10) -> Dict[str, Any]:
+        """
+        Unified search that combines metadata search and full-content search results.
+        Returns both types of results for comprehensive code discovery.
+        """
+        if not self.db:
+            return {"metadata_results": [], "content_results": [], "total_results": 0}
+        
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return {"error": "Invalid dataset name", "metadata_results": [], "content_results": [], "total_results": 0}
+        
+        # Get metadata search results
+        metadata_results = self.search_files(query, dataset_name, limit)
+        
+        # Get full-content search results
+        content_results = self.search_full_content(query, dataset_name, limit)
+        
+        # Combine and deduplicate results by filepath
+        seen_files = set()
+        combined_metadata = []
+        combined_content = []
+        
+        # Process metadata results
+        for result in metadata_results:
+            filepath = result["filepath"]
+            if filepath not in seen_files:
+                seen_files.add(filepath)
+                combined_metadata.append(result)
+        
+        # Process content results, avoiding duplicates
+        for result in content_results:
+            filepath = result["filepath"]
+            if filepath not in seen_files:
+                seen_files.add(filepath)
+                combined_content.append(result)
+            else:
+                # File already found in metadata search, add content snippet to existing result
+                for meta_result in combined_metadata:
+                    if meta_result["filepath"] == filepath:
+                        meta_result["content_snippet"] = result.get("content_snippet", "")
+                        meta_result["search_type"] = "both"
+                        break
+        
+        total_results = len(combined_metadata) + len(combined_content)
+        
+        return {
+            "query": query,
+            "dataset_name": dataset_name,
+            "metadata_results": combined_metadata,
+            "content_results": combined_content,
+            "total_results": total_results,
+            "search_summary": {
+                "metadata_matches": len(combined_metadata),
+                "content_only_matches": len(combined_content),
+                "total_unique_files": total_results
+            }
+        }
+    
     def populate_spellfix_vocabulary(self, dataset_name: str):
         """Populate spellfix vocabulary from dataset for better search suggestions."""
         if not self.db:
