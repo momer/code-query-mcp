@@ -118,6 +118,7 @@ class CodeQueryServer:
                 other_notes TEXT,
                 documented_at_commit TEXT,
                 documented_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                full_content TEXT,
                 PRIMARY KEY (dataset_id, filepath)
             )
         """)
@@ -157,6 +158,7 @@ class CodeQueryServer:
                     constants,
                     dependencies,
                     other_notes,
+                    full_content,
                     content='files',
                     content_rowid='rowid'
                 )
@@ -167,11 +169,11 @@ class CodeQueryServer:
                 CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
                     INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, ddd_context,
                         functions, exports, imports, types_interfaces_classes, constants, 
-                        dependencies, other_notes)
+                        dependencies, other_notes, full_content)
                     VALUES (new.rowid, new.dataset_id, new.filepath, new.filename, new.overview, 
                         new.ddd_context, new.functions, new.exports, new.imports, 
                         new.types_interfaces_classes, new.constants, new.dependencies, 
-                        new.other_notes);
+                        new.other_notes, new.full_content);
                 END
             """)
             
@@ -179,11 +181,11 @@ class CodeQueryServer:
                 CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN
                     INSERT INTO files_fts(files_fts, rowid, dataset_id, filepath, filename, 
                         overview, ddd_context, functions, exports, imports, 
-                        types_interfaces_classes, constants, dependencies, other_notes)
+                        types_interfaces_classes, constants, dependencies, other_notes, full_content)
                     VALUES ('delete', old.rowid, old.dataset_id, old.filepath, old.filename, 
                         old.overview, old.ddd_context, old.functions, old.exports, 
                         old.imports, old.types_interfaces_classes, old.constants, 
-                        old.dependencies, old.other_notes);
+                        old.dependencies, old.other_notes, old.full_content);
                 END
             """)
             
@@ -191,18 +193,18 @@ class CodeQueryServer:
                 CREATE TRIGGER files_au AFTER UPDATE ON files BEGIN
                     INSERT INTO files_fts(files_fts, rowid, dataset_id, filepath, filename, 
                         overview, ddd_context, functions, exports, imports, 
-                        types_interfaces_classes, constants, dependencies, other_notes)
+                        types_interfaces_classes, constants, dependencies, other_notes, full_content)
                     VALUES ('delete', old.rowid, old.dataset_id, old.filepath, old.filename, 
                         old.overview, old.ddd_context, old.functions, old.exports, 
                         old.imports, old.types_interfaces_classes, old.constants, 
-                        old.dependencies, old.other_notes);
+                        old.dependencies, old.other_notes, old.full_content);
                     INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, 
                         ddd_context, functions, exports, imports, types_interfaces_classes, 
-                        constants, dependencies, other_notes)
+                        constants, dependencies, other_notes, full_content)
                     VALUES (new.rowid, new.dataset_id, new.filepath, new.filename, new.overview, 
                         new.ddd_context, new.functions, new.exports, new.imports, 
                         new.types_interfaces_classes, new.constants, new.dependencies, 
-                        new.other_notes);
+                        new.other_notes, new.full_content);
                 END
             """)
             
@@ -230,6 +232,7 @@ class CodeQueryServer:
                     constants,
                     dependencies,
                     other_notes,
+                    full_content,
                     content='files',
                     content_rowid='rowid'
                 )
@@ -240,11 +243,11 @@ class CodeQueryServer:
                 CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
                     INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, ddd_context,
                         functions, exports, imports, types_interfaces_classes, constants, 
-                        dependencies, other_notes)
+                        dependencies, other_notes, full_content)
                     VALUES (new.rowid, new.dataset_id, new.filepath, new.filename, new.overview, 
                         new.ddd_context, new.functions, new.exports, new.imports, 
                         new.types_interfaces_classes, new.constants, new.dependencies, 
-                        new.other_notes);
+                        new.other_notes, new.full_content);
                 END
             """)
             
@@ -252,11 +255,11 @@ class CodeQueryServer:
                 CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN
                     INSERT INTO files_fts(files_fts, rowid, dataset_id, filepath, filename, 
                         overview, ddd_context, functions, exports, imports, 
-                        types_interfaces_classes, constants, dependencies, other_notes)
+                        types_interfaces_classes, constants, dependencies, other_notes, full_content)
                     VALUES ('delete', old.rowid, old.dataset_id, old.filepath, old.filename, 
                         old.overview, old.ddd_context, old.functions, old.exports, 
                         old.imports, old.types_interfaces_classes, old.constants, 
-                        old.dependencies, old.other_notes);
+                        old.dependencies, old.other_notes, old.full_content);
                 END
             """)
             
@@ -264,18 +267,18 @@ class CodeQueryServer:
                 CREATE TRIGGER files_au AFTER UPDATE ON files BEGIN
                     INSERT INTO files_fts(files_fts, rowid, dataset_id, filepath, filename, 
                         overview, ddd_context, functions, exports, imports, 
-                        types_interfaces_classes, constants, dependencies, other_notes)
+                        types_interfaces_classes, constants, dependencies, other_notes, full_content)
                     VALUES ('delete', old.rowid, old.dataset_id, old.filepath, old.filename, 
                         old.overview, old.ddd_context, old.functions, old.exports, 
                         old.imports, old.types_interfaces_classes, old.constants, 
-                        old.dependencies, old.other_notes);
+                        old.dependencies, old.other_notes, old.full_content);
                     INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, 
                         ddd_context, functions, exports, imports, types_interfaces_classes, 
-                        constants, dependencies, other_notes)
+                        constants, dependencies, other_notes, full_content)
                     VALUES (new.rowid, new.dataset_id, new.filepath, new.filename, new.overview, 
                         new.ddd_context, new.functions, new.exports, new.imports, 
                         new.types_interfaces_classes, new.constants, new.dependencies, 
-                        new.other_notes);
+                        new.other_notes, new.full_content);
                 END
             """)
             
@@ -326,16 +329,27 @@ class CodeQueryServer:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
+                # Read full file content if filepath exists and is readable
+                full_content = None
+                filepath = data.get('filepath', '')
+                if filepath and os.path.isfile(filepath):
+                    try:
+                        with open(filepath, 'r', encoding='utf-8', errors='replace') as source_file:
+                            full_content = source_file.read()
+                    except Exception as read_error:
+                        logging.warning(f"Could not read source file {filepath}: {read_error}")
+                        full_content = f"[Error reading file: {read_error}]"
+                
                 # Insert into database
                 self.db.execute("""
                     INSERT OR REPLACE INTO files (
                         dataset_id, filepath, filename, overview, ddd_context,
                         functions, exports, imports, types_interfaces_classes,
-                        constants, dependencies, other_notes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        constants, dependencies, other_notes, full_content
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     dataset_name,
-                    data.get('filepath', ''),
+                    filepath,
                     data.get('filename', ''),
                     data.get('overview', ''),
                     data.get('ddd_context', ''),
@@ -345,7 +359,8 @@ class CodeQueryServer:
                     json.dumps(data.get('types_interfaces_classes', {})),
                     json.dumps(data.get('constants', {})),
                     json.dumps(data.get('dependencies', [])),
-                    json.dumps(data.get('other_notes', []))
+                    json.dumps(data.get('other_notes', [])),
+                    full_content
                 ))
                 imported += 1
             except Exception as e:
@@ -437,6 +452,82 @@ class CodeQueryServer:
                 "ddd_context": row["ddd_context"],
                 "match_snippet": row["match_snippet"]
             })
+        
+        return results
+    
+    def search_full_content(self, query: str, dataset_name: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Search full file contents using FTS5 for comprehensive code search."""
+        if not self.db:
+            return []
+        
+        # Validate dataset name
+        if not self._is_valid_dataset_name(dataset_name):
+            return []
+        
+        results = []
+        
+        # Check if FTS5 is available
+        cursor = self.db.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='files_fts'
+        """)
+        
+        if cursor.fetchone():
+            # Use FTS5 for search with focus on full_content
+            # Use regex to correctly handle quoted phrases and individual terms
+            import re
+            terms = re.findall(r'"[^"]+"|\\S+', query)
+            # Sanitize by ensuring non-quoted terms are wrapped in quotes for the query
+            sanitized_terms = [term if term.startswith('"') else f'"{term}"' for term in terms]
+            fts_query = ' '.join(sanitized_terms)
+            
+            cursor = self.db.execute("""
+                SELECT f.filepath, f.filename, f.overview, f.ddd_context,
+                       snippet(files_fts, 12, '[MATCH]', '[/MATCH]', '...', 128) as content_snippet,
+                       rank
+                FROM files f
+                JOIN files_fts ON f.rowid = files_fts.rowid
+                WHERE files_fts MATCH ('full_content:' || ?)
+                AND f.dataset_id = ?
+                ORDER BY rank
+                LIMIT ?
+            """, (fts_query, dataset_name, limit))
+            
+            for row in cursor:
+                results.append({
+                    "filepath": row["filepath"],
+                    "filename": row["filename"],
+                    "overview": row["overview"],
+                    "ddd_context": row["ddd_context"],
+                    "content_snippet": row["content_snippet"],
+                    "search_type": "full_content",
+                    "rank": row["rank"]
+                })
+        else:
+            # Fallback to LIKE search on full_content
+            like_query = f"%{query}%"
+            cursor = self.db.execute("""
+                SELECT filepath, filename, overview, ddd_context,
+                       SUBSTR(full_content, 
+                              CASE WHEN INSTR(LOWER(full_content), LOWER(?)) > 64 
+                                   THEN INSTR(LOWER(full_content), LOWER(?)) - 64 
+                                   ELSE 1 END, 
+                              256) as content_snippet
+                FROM files
+                WHERE dataset_id = ? AND full_content LIKE ?
+                LIMIT ?
+            """, (query, query, dataset_name, like_query, limit))
+            
+            for row in cursor:
+                results.append({
+                    "filepath": row["filepath"],
+                    "filename": row["filename"],
+                    "overview": row["overview"],
+                    "ddd_context": row["ddd_context"],
+                    "content_snippet": row["content_snippet"],
+                    "search_type": "full_content_fallback",
+                    "warning": "FTS5 is not available; used slower fallback search."
+                })
         
         return results
     
@@ -826,13 +917,23 @@ Would you like me to provide the file batches for you to process?
             # Get current commit hash for tracking
             current_commit = get_current_commit(self.cwd)
             
+            # Read full file content if filepath exists and is readable
+            full_content = None
+            if filepath and os.path.isfile(filepath):
+                try:
+                    with open(filepath, 'r', encoding='utf-8', errors='replace') as source_file:
+                        full_content = source_file.read()
+                except Exception as read_error:
+                    logging.warning(f"Could not read source file {filepath}: {read_error}")
+                    full_content = f"[Error reading file: {read_error}]"
+            
             self.db.execute("""
                 INSERT OR REPLACE INTO files (
                     dataset_id, filepath, filename, overview, ddd_context,
                     functions, exports, imports, types_interfaces_classes,
                     constants, dependencies, other_notes, documented_at_commit,
-                    documented_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    documented_at, full_content
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
             """, (
                 dataset_name,
                 filepath,
@@ -846,7 +947,8 @@ Would you like me to provide the file batches for you to process?
                 json.dumps(constants or {}),
                 json.dumps(dependencies or []),
                 json.dumps(other_notes or []),
-                current_commit
+                current_commit,
+                full_content
             ))
             
             # Update dataset metadata file count
@@ -1216,12 +1318,12 @@ Would you like me to provide the file batches for you to process?
                 INSERT INTO files (
                     dataset_id, filepath, filename, overview, ddd_context,
                     functions, exports, imports, types_interfaces_classes,
-                    constants, dependencies, other_notes
+                    constants, dependencies, other_notes, full_content
                 )
                 SELECT 
                     ?, filepath, filename, overview, ddd_context,
                     functions, exports, imports, types_interfaces_classes,
-                    constants, dependencies, other_notes
+                    constants, dependencies, other_notes, full_content
                 FROM files
                 WHERE dataset_id = ?
             """, (target_dataset, source_dataset))

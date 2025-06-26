@@ -38,6 +38,11 @@ class SchemaMigrator:
         cursor = self.db.execute("SELECT version FROM schema_version WHERE version = '1.0.0'")
         if not cursor.fetchone():
             self._migrate_to_v1_0_0()
+        
+        # Migrate to v1.1.0 if needed (full-content support)
+        cursor = self.db.execute("SELECT version FROM schema_version WHERE version = '1.1.0'")
+        if not cursor.fetchone():
+            self._migrate_to_v1_1_0()
     
     def _migrate_legacy_to_datasets(self):
         """Migrate from legacy schema to dataset-based schema."""
@@ -205,3 +210,45 @@ class SchemaMigrator:
         
         self.db.commit()
         logging.info("Successfully migrated to schema v1.0.0")
+    
+    def _migrate_to_v1_1_0(self):
+        """Migrate to schema v1.1.0 with full-content support."""
+        logging.info("Migrating to schema v1.1.0...")
+        
+        # Check if full_content column exists
+        cursor = self.db.execute("PRAGMA table_info(files)")
+        file_columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'full_content' not in file_columns:
+            logging.info("Adding full_content column...")
+            
+            try:
+                # Add full_content column to files table
+                self.db.execute("""
+                    ALTER TABLE files 
+                    ADD COLUMN full_content TEXT
+                """)
+                
+                # Drop existing FTS table to recreate with full_content
+                cursor = self.db.execute("""
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND name='files_fts'
+                """)
+                if cursor.fetchone():
+                    logging.info("Dropping existing FTS table to add full_content support...")
+                    self.db.execute("DROP TABLE files_fts")
+                
+                self.db.commit()
+                logging.info("Successfully added full_content column")
+                
+            except sqlite3.OperationalError as e:
+                logging.error(f"Could not add full_content column: {e}")
+                raise
+        
+        # Mark v1.1.0 as applied
+        self.db.execute("""
+            INSERT OR REPLACE INTO schema_version (version) VALUES ('1.1.0')
+        """)
+        
+        self.db.commit()
+        logging.info("Successfully migrated to schema v1.1.0")

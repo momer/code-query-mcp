@@ -91,6 +91,40 @@ Examples:
             }
         ),
         Tool(
+            name="search_full_content",
+            description="""Search full file contents using FTS5 for comprehensive code search. This provides deep content search within actual source code files, complementing the metadata search provided by search_files. Returns snippets of actual code content where matches are found.
+
+IMPORTANT: This searches the actual source code content, not just metadata. Use for finding specific code patterns, function implementations, variable usage, etc.
+
+Good use cases:
+- "function calculateTotal" - Find function definitions
+- "const API_URL" - Find constant declarations  
+- "import React" - Find import statements
+- "catch (error)" - Find error handling patterns
+- "SELECT * FROM" - Find SQL queries
+
+Returns content snippets with [MATCH] markers around found terms.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query for full content search"
+                    },
+                    "dataset_name": {
+                        "type": "string",
+                        "description": "Dataset to search in. Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if unknown."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return",
+                        "default": 10
+                    }
+                },
+                "required": ["query", "dataset_name"]
+            }
+        ),
+        Tool(
             name="get_file",
             description="Get complete detailed documentation for a specific file including functions, exports, imports, types, interfaces, classes, constants, dependencies, and other comprehensive analysis. This provides full details that mcp__code-query__search_files does not include. Supports partial path matching (e.g., 'login.ts' finds 'src/auth/login.ts'). Use mcp__code-query__get_project_config first to check for active dataset, then mcp__code-query__list_datasets if dataset name is unknown.",
             inputSchema={

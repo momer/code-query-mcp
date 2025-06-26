@@ -76,6 +76,13 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         results = query_server.search_files(query, dataset_name, limit)
         return [TextContent(type="text", text=json.dumps(results, indent=2))]
     
+    elif name == "search_full_content":
+        query = arguments.get("query", "")
+        dataset_name = arguments.get("dataset_name", "")
+        limit = arguments.get("limit", 10)
+        results = query_server.search_full_content(query, dataset_name, limit)
+        return [TextContent(type="text", text=json.dumps(results, indent=2))]
+    
     elif name == "get_file":
         filepath = arguments.get("filepath", "")
         dataset_name = arguments.get("dataset_name", "")
