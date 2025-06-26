@@ -1431,17 +1431,26 @@ Would you like me to provide the file batches for you to process?
 # This hook queues changed files for documentation updates
 set -euo pipefail
 
-# Get the dataset name from config
-CONFIG_FILE=".code-query/config.json"
+# Get the working directory (git hooks run from repo root)
+WORK_DIR=$(git rev-parse --show-toplevel)
+cd "$WORK_DIR"
+
+# Get the dataset name from config using absolute path
+CONFIG_FILE="$WORK_DIR/.code-query/config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo "⚠️  Code Query: No config file found. Skipping documentation queue."
+    echo "⚠️  Code Query: No config file found at $CONFIG_FILE. Skipping documentation queue."
     exit 0
 fi
 
 # Validate dataset name from config (prevent injection)
 DATASET_NAME=$(jq -r '.mainDatasetName // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+if [ -z "$DATASET_NAME" ]; then
+    echo "⚠️  Code Query: Dataset name not found in configuration."
+    exit 0
+fi
+
 if ! [[ "$DATASET_NAME" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
-    echo "⚠️  Code Query: Invalid dataset name in config. Skipping."
+    echo "⚠️  Code Query: Invalid dataset name in config: '$DATASET_NAME'. Skipping."
     exit 0
 fi
 
@@ -1451,9 +1460,9 @@ if [ -z "$CHANGED_FILES" ]; then
     exit 0
 fi
 
-# Create queue file
-QUEUE_FILE=".code-query/doc-queue.txt"
-mkdir -p .code-query
+# Create queue file using absolute path
+QUEUE_FILE="$WORK_DIR/.code-query/doc-queue.txt"
+mkdir -p "$WORK_DIR/.code-query"
 
 # Add files to queue (one per line, no duplicates)
 echo "$CHANGED_FILES" | while read -r file; do
@@ -1571,6 +1580,10 @@ if [ -f .git/MERGE_HEAD ]; then
     exit 0
 fi
 
+# Get the working directory (git hooks run from repo root)
+WORK_DIR=$(git rev-parse --show-toplevel)
+cd "$WORK_DIR"
+
 # Check if jq is installed
 if ! command -v jq &> /dev/null; then
     echo "⚠️  Code Query: 'jq' is required but not installed."
@@ -1578,16 +1591,21 @@ if ! command -v jq &> /dev/null; then
     exit 0
 fi
 
-# Get current dataset from config
-CONFIG_FILE=".code-query/config.json"
+# Get current dataset from config using absolute path
+CONFIG_FILE="$WORK_DIR/.code-query/config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
     exit 0
 fi
 
 # Read and validate dataset name from config to prevent injection
 CURRENT_DATASET=$(jq -r '.mainDatasetName // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+if [ -z "$CURRENT_DATASET" ]; then
+    echo "⚠️  Code Query: Dataset name not found in configuration."
+    exit 0
+fi
+
 if ! [[ "$CURRENT_DATASET" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
-    echo "⚠️  Code Query: Invalid dataset name in config. Skipping."
+    echo "⚠️  Code Query: Invalid dataset name in config: '$CURRENT_DATASET'. Skipping."
     exit 0
 fi
 
