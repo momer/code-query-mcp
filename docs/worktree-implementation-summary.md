@@ -5,7 +5,7 @@
 ### 1. Core Worktree Detection and Auto-forking ✓
 - Added `is_worktree()`, `get_main_worktree_path()`, and `get_worktree_info()` to `helpers/git_helper.py`
 - Updated `server.py` to detect worktrees on startup and auto-fork datasets
-- Naming convention: `{main_dataset}_{sanitized_branch}` (cleaner, no __wt_ prefix)
+- Naming convention: `{main_dataset}_{sanitized_branch}` (cleaner, no __wt__ prefix)
 - Config schema updated to use `mainDatasetName` (v1.1.0)
 - Added `dataset_type` column to properly track worktree vs main datasets
 
@@ -19,7 +19,7 @@
 - **Usage**: After merging branches, run:
   ```
   sync_dataset(
-    source_dataset="project__wt_feature_branch",
+    source_dataset="project_feature_branch",
     target_dataset="project_main",
     source_ref="feature/branch",
     target_ref="main"

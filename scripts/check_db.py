@@ -49,7 +49,7 @@ def main():
         print(f"  Loaded: {dataset['loaded_at']}")
         
         # Check if specific dataset has any files
-        if dataset['name'] == 'acorn_files__wt_feat_wire_up_device_connection':
+        if dataset['name'] == 'acorn_files_feat_wire_up_device_connection':
             print(f"  Checking files in dataset '{dataset['name']}'...")
             file_cursor = conn.execute("""
                 SELECT filepath, filename, overview 
@@ -69,7 +69,7 @@ def main():
         print()
     
     # Test the specific query that's failing
-    test_dataset = 'acorn_files__wt_feat_wire_up_device_connection'
+    test_dataset = 'acorn_files_feat_wire_up_device_connection'
     print(f"Testing search for 'protocol' in dataset '{test_dataset}':")
     
     search_cursor = conn.execute("""

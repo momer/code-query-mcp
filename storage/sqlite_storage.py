@@ -379,11 +379,9 @@ class CodeQueryServer:
                 """)
                 
                 # Update existing worktree datasets based on naming pattern
-                self.db.execute("""
-                    UPDATE dataset_metadata 
-                    SET dataset_type = 'worktree'
-                    WHERE dataset_id LIKE '%__wt_%'
-                """)
+                # New pattern: mainDataset_branchName (contains underscore but not __wt_)
+                # This is tricky because we can't easily distinguish worktree datasets
+                # from main datasets that have underscores. For migration, we'll skip this.
                 
                 logging.info("Successfully added dataset_type column")
             except sqlite3.OperationalError as e:
@@ -1162,8 +1160,8 @@ Would you like me to provide the file batches for you to process?
                     # Use the provided name as base
                     main_dataset = dataset_name
                 
-                # Create worktree-specific dataset name
-                wt_dataset_name = f"{main_dataset}__wt_{sanitized_branch}"
+                # Create worktree-specific dataset name with new convention
+                wt_dataset_name = f"{main_dataset}_{sanitized_branch}"
                 
                 # Check if we need to fork
                 cursor = self.db.execute("""
@@ -1594,29 +1592,44 @@ if ! [[ "$CURRENT_DATASET" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
 fi
 
 # Check if this is a worktree dataset
-if [[ "$CURRENT_DATASET" == *"__wt_"* ]]; then
-    # Extract main dataset name (everything before __wt_)
-    # Fixed variable expansion and added quotes for safety
-    MAIN_DATASET="${CURRENT_DATASET%%__wt_*}"
+# New naming convention: {main_dataset}_{branch_name}
+# We need to determine if this is a worktree by checking git
+if git rev-parse --git-common-dir >/dev/null 2>&1; then
+    GIT_COMMON_DIR=$(git rev-parse --git-common-dir)
+    GIT_DIR=$(git rev-parse --git-dir)
     
-    # Validate the extracted main dataset name
-    if ! [[ "$MAIN_DATASET" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
-        echo "⚠️  Code Query: Invalid main dataset name. Skipping."
-        exit 0
+    # If they're different, we're in a worktree
+    if [ "$GIT_COMMON_DIR" != "$GIT_DIR" ]; then
+        # Extract main dataset name by removing the branch suffix
+        # Assuming pattern: mainDataset_branchName
+        # We'll need to get the main dataset from the main worktree's config
+        MAIN_WORKTREE_CONFIG="$GIT_COMMON_DIR/../.code-query/config.json"
+        if [ -f "$MAIN_WORKTREE_CONFIG" ]; then
+            MAIN_DATASET=$(jq -r '.mainDatasetName // empty' "$MAIN_WORKTREE_CONFIG" 2>/dev/null || echo "")
+        else
+            # Fallback: assume everything before the last underscore is the main dataset
+            MAIN_DATASET="${CURRENT_DATASET%_*}"
+        fi
+        
+        # Validate the extracted main dataset name
+        if ! [[ "$MAIN_DATASET" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+            echo "⚠️  Code Query: Invalid main dataset name. Skipping."
+            exit 0
+        fi
+        
+        # Get merge base and head for sync
+        MERGE_BASE=$(git merge-base HEAD ORIG_HEAD 2>/dev/null || echo "")
+        if [ -z "$MERGE_BASE" ]; then
+            exit 0
+        fi
+        
+        echo "🔄 Code Query: Post-merge sync opportunity detected"
+        echo "   From worktree dataset: $CURRENT_DATASET"
+        echo "   To main dataset: $MAIN_DATASET"
+        echo ""
+        echo "   To sync changes, run:"
+        echo "   code-query:sync_dataset source_dataset='$CURRENT_DATASET' target_dataset='$MAIN_DATASET' source_ref='HEAD' target_ref='$MERGE_BASE'"
     fi
-    
-    # Get merge base and head for sync
-    MERGE_BASE=$(git merge-base HEAD ORIG_HEAD 2>/dev/null || echo "")
-    if [ -z "$MERGE_BASE" ]; then
-        exit 0
-    fi
-    
-    echo "🔄 Code Query: Post-merge sync opportunity detected"
-    echo "   From worktree dataset: $CURRENT_DATASET"
-    echo "   To main dataset: $MAIN_DATASET"
-    echo ""
-    echo "   To sync changes, run:"
-    echo "   code-query:sync_dataset source_dataset='$CURRENT_DATASET' target_dataset='$MAIN_DATASET' source_ref='HEAD' target_ref='$MERGE_BASE'"
     echo ""
     echo "   This will update the main dataset with changes from this worktree."
 fi
@@ -1795,6 +1808,7 @@ exit 0
             type_based_datasets = cursor.fetchall()
             
             # Also check naming convention for backward compatibility with old datasets
+            # Skip pattern-based detection since new convention doesn't have a clear pattern
             cursor = self.db.execute("""
                 SELECT dataset_id 
                 FROM dataset_metadata 
@@ -2049,7 +2063,7 @@ exit 0
                             main_dataset_exists = True
                             break
                 
-                wt_dataset_name = f"{final_dataset_name}__wt_{wt_info['sanitized_branch']}"
+                wt_dataset_name = f"{final_dataset_name}_{wt_info['sanitized_branch']}"
                 copy_note = ""
                 if main_dataset_exists:
                     copy_note = f" Your existing dataset '{final_dataset_name}' will be COPIED to create the worktree dataset - no data will be lost."

@@ -14,7 +14,7 @@ from helpers.git_helper import get_git_info
 def main():
     if len(sys.argv) != 4:
         print("Usage: python manual_fork.py <project_path> <source_dataset> <target_dataset>")
-        print("Example: python manual_fork.py /path/to/main/worktree acorn_files acorn_files__wt_feat_wire_up_device_connection")
+        print("Example: python manual_fork.py /path/to/main/worktree acorn_files acorn_files_feat_wire_up_device_connection")
         sys.exit(1)
     
     project_path = sys.argv[1]

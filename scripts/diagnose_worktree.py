@@ -99,8 +99,9 @@ def main():
                 print(f"  Files in dataset: {count}")
                 
                 # Check if it looks like a worktree dataset name
-                if "__wt_" in expected_dataset:
-                    base_dataset = expected_dataset.split("__wt_")[0]
+                # With new naming convention, base dataset is everything before last underscore
+                if "_" in expected_dataset and expected_dataset.count("_") > 0:
+                    base_dataset = expected_dataset.rsplit("_", 1)[0]
                     print(f"\nChecking base dataset: {base_dataset}")
                     cursor = conn.execute("""
                         SELECT COUNT(*) as count FROM files WHERE dataset_id = ?
