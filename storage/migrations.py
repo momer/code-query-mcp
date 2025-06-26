@@ -21,6 +21,24 @@ class SchemaMigrator:
             )
         """)
         
+        # Fix schema_version table if it has wrong column type (legacy)
+        cursor = self.db.execute("PRAGMA table_info(schema_version)")
+        columns = {col[1]: col[2] for col in cursor.fetchall()}
+        
+        if columns.get('version') == 'INTEGER':
+            logging.info("Migrating schema_version table to use TEXT version...")
+            # Create new schema_version table with correct schema
+            self.db.execute("""
+                CREATE TABLE schema_version_new (
+                    version TEXT PRIMARY KEY,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Note: We'll ignore old integer versions and start fresh with text versions
+            self.db.execute("DROP TABLE schema_version")
+            self.db.execute("ALTER TABLE schema_version_new RENAME TO schema_version")
+            self.db.commit()
+        
         # Check if dataset_id column exists (legacy migration)
         cursor = self.db.execute("PRAGMA table_info(files)")
         columns = [col[1] for col in cursor.fetchall()]
@@ -154,6 +172,9 @@ class SchemaMigrator:
         
         if 'documented_at_commit' not in file_columns:
             logging.info("Adding commit tracking columns...")
+            
+            # Drop temporary table if it exists from previous failed migration
+            self.db.execute("DROP TABLE IF EXISTS files_v1")
             
             # Create new table with v1.0.0 schema
             self.db.execute("""

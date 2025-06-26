@@ -12,7 +12,7 @@ import json
 import logging
 from typing import List, Dict, Any
 from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import Tool, TextContent, InitializeRequestParams
 from mcp.server.stdio import stdio_server
 from mcp.server.models import InitializationOptions
 from mcp.server.lowlevel import NotificationOptions
@@ -26,7 +26,9 @@ from tools.mcp_tools import get_tools
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Database configuration - attempt to get Git repository information
-git_info = get_git_info()
+# Use client root directory if available, otherwise current working directory
+client_root = os.environ.get('MCP_CLIENT_ROOT', os.getcwd())
+git_info = get_git_info(cwd=client_root)
 
 if git_info:
     # We are in a Git repository. Use the toplevel path for the DB.
@@ -34,8 +36,8 @@ if git_info:
     DB_PATH = os.path.join(DB_DIR, "code_data.db")
     logging.info(f"Git repo detected. Using shared DB at {DB_PATH}")
 else:
-    # Fallback for non-Git directories. Use the current working directory.
-    DB_DIR = os.path.join(os.getcwd(), ".mcp_code_query")
+    # Fallback for non-Git directories. Use the client root directory.
+    DB_DIR = os.path.join(client_root, ".mcp_code_query")
     DB_PATH = os.path.join(DB_DIR, "code_data.db")
     logging.info(f"No Git repo detected. Using local DB at {DB_PATH}.")
 
@@ -45,6 +47,7 @@ os.makedirs(DB_DIR, exist_ok=True)
 # Initialize server
 server = Server("code-query")
 query_server = CodeQueryServer(DB_PATH, DB_DIR)
+
 
 
 @server.list_tools()
@@ -249,65 +252,6 @@ async def main():
     # Detect worktree and setup appropriate dataset
     worktree_info = get_worktree_info()
     active_dataset_name = None
-    
-    if worktree_info:
-        # We're in a git repository
-        if worktree_info["is_worktree"]:
-            # This is a linked worktree - need to check main config
-            main_config_path = os.path.join(worktree_info["main_path"], ".code-query", "config.json")
-            
-            if os.path.exists(main_config_path):
-                try:
-                    with open(main_config_path, 'r') as f:
-                        main_config = json.load(f)
-                    
-                    # Support both old and new config schema
-                    main_dataset_name = main_config.get("mainDatasetName") or main_config.get("datasetName")
-                    
-                    if main_dataset_name:
-                        # Derive worktree dataset name - use cleaner naming without __wt_
-                        worktree_dataset_name = f"{main_dataset_name}_{worktree_info['sanitized_branch']}"
-                        
-                        # Check if worktree dataset exists
-                        existing_datasets = {d['name'] for d in query_server.list_datasets()}
-                        
-                        if worktree_dataset_name not in existing_datasets:
-                            logging.info(f"Creating worktree dataset '{worktree_dataset_name}' from '{main_dataset_name}'...")
-                            fork_result = query_server.fork_dataset(main_dataset_name, worktree_dataset_name)
-                            
-                            if not fork_result.get("success"):
-                                logging.error(f"Failed to fork dataset: {fork_result.get('message')}")
-                                logging.info(f"Falling back to main dataset '{main_dataset_name}'")
-                                active_dataset_name = main_dataset_name
-                            else:
-                                logging.info(f"Successfully created worktree dataset '{worktree_dataset_name}'")
-                                active_dataset_name = worktree_dataset_name
-                        else:
-                            logging.info(f"Using existing worktree dataset '{worktree_dataset_name}'")
-                            active_dataset_name = worktree_dataset_name
-                    else:
-                        logging.warning("No mainDatasetName found in main config. Please run setup on main branch first.")
-                except Exception as e:
-                    logging.error(f"Error reading main config: {e}")
-            else:
-                logging.warning("No config found in main worktree. Please run setup on main branch first.")
-        else:
-            # This is the main worktree - check local config
-            local_config_path = os.path.join(os.getcwd(), ".code-query", "config.json")
-            if os.path.exists(local_config_path):
-                try:
-                    with open(local_config_path, 'r') as f:
-                        config = json.load(f)
-                    active_dataset_name = config.get("mainDatasetName") or config.get("datasetName")
-                except Exception as e:
-                    logging.error(f"Error reading config: {e}")
-    
-    if active_dataset_name:
-        logging.info(f"Active dataset for this session: '{active_dataset_name}'")
-        # Store the active dataset name on the query_server for tool use
-        query_server.active_dataset = active_dataset_name
-    else:
-        logging.info("No active dataset configured. Tools will require explicit dataset names.")
     
     if worktree_info:
         # We're in a git repository
