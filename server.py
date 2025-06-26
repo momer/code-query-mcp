@@ -42,6 +42,10 @@ def get_git_info(cwd: str = None) -> dict | None:
             ["git", "rev-parse", "--git-common-dir"], cwd=cwd, text=True, stderr=subprocess.PIPE
         ).strip()
         
+        # Convert to absolute path if relative
+        if not os.path.isabs(git_common_dir):
+            git_common_dir = os.path.abspath(os.path.join(cwd, git_common_dir))
+        
         # The main repository root is the parent of the common git directory
         toplevel = os.path.dirname(git_common_dir)
 
