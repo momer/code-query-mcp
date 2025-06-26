@@ -766,7 +766,30 @@ class CodeQueryServer:
             # Get datasets list
             datasets = self.list_datasets()
             
-            return {
+            # Check if we're in a worktree and get current dataset info
+            from helpers.git_helper import get_worktree_info
+            wt_info = get_worktree_info(self.cwd)
+            current_dataset_info = None
+            
+            if wt_info and wt_info['is_worktree']:
+                # Try to get the current dataset from config
+                config_path = os.path.join(self.cwd, ".code-query", "config.json")
+                if os.path.exists(config_path):
+                    try:
+                        with open(config_path, 'r') as f:
+                            config_data = json.load(f)
+                            dataset_name = config_data.get('mainDatasetName')
+                            if dataset_name:
+                                current_dataset_info = {
+                                    "name": dataset_name,
+                                    "type": "worktree",
+                                    "branch": wt_info['branch'],
+                                    "note": f"This is a git worktree using dataset '{dataset_name}' (isolated from main)"
+                                }
+                    except Exception:
+                        pass
+            
+            status_data = {
                 "connected": True,
                 "database_path": self.db_path,
                 "dataset_count": row['dataset_count'],
@@ -774,6 +797,11 @@ class CodeQueryServer:
                 "fts5_enabled": has_fts,
                 "datasets": datasets
             }
+            
+            if current_dataset_info:
+                status_data["current_dataset"] = current_dataset_info
+            
+            return status_data
         except Exception as e:
             return {
                 "connected": True,
@@ -1187,7 +1215,8 @@ Would you like me to provide the file batches for you to process?
                 config_data['worktreeInfo'] = {
                     'branch': wt_info['branch'],
                     'mainDataset': main_dataset,
-                    'isWorktree': True
+                    'isWorktree': True,
+                    'datasetNote': f"This worktree uses dataset '{actual_dataset_name}' which is isolated from the main dataset"
                 }
             
             # Write config file
@@ -1201,6 +1230,16 @@ Would you like me to provide the file batches for you to process?
                 "config_path": config_path,
                 "config": config_data
             }
+            
+            # Add clear worktree information to response
+            if wt_info and wt_info['is_worktree']:
+                response["worktree_dataset_info"] = {
+                    "note": "This is a git worktree - data will be stored in a separate dataset",
+                    "worktree_dataset": actual_dataset_name,
+                    "main_dataset": main_dataset,
+                    "branch": wt_info['branch'],
+                    "data_isolation": "All operations in this worktree will use the worktree-specific dataset"
+                }
             
             if auto_fork_info:
                 response["auto_fork"] = auto_fork_info
@@ -1962,6 +2001,10 @@ exit 0
                         f"Use code-query MCP to install post-merge hook for '{final_dataset_name}'"
                     )
             
+            # Check if we're in a worktree
+            from helpers.git_helper import get_worktree_info
+            wt_info = get_worktree_info(self.cwd)
+            
             # Build response
             response = {
                 "success": True,
@@ -1979,6 +2022,14 @@ exit 0
                 "setup_needed": len(setup_steps) > 0,
                 "setup_steps": setup_steps
             }
+            
+            # Add worktree information if applicable
+            if wt_info and wt_info['is_worktree']:
+                response["worktree_info"] = {
+                    "detected": True,
+                    "branch": wt_info['branch'],
+                    "note": f"Git worktree detected. Dataset will be automatically namespaced as '{final_dataset_name}__wt_{wt_info['sanitized_branch']}'"
+                }
             
             if recommended_commands:
                 # Separate optional git hook commands from required commands
