@@ -7,6 +7,7 @@ import glob
 import logging
 import fnmatch
 import subprocess
+import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from helpers.git_helper import get_actual_git_dir
