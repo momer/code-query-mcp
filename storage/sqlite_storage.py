@@ -1337,10 +1337,8 @@ Would you like me to provide the file batches for you to process?
                     ".pytest_cache/*"
                 ]
             
-            # Model selection with interactive prompt if not provided
-            selected_model = model
-            if not selected_model:
-                selected_model = self._prompt_for_model_selection()
+            # Model selection - default to sonnet if not provided (no interactive prompt in MCP context)
+            selected_model = model or "sonnet"
             
             config_data = {
                 "mainDatasetName": actual_dataset_name,
