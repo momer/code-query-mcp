@@ -725,9 +725,12 @@ class CodeQueryServer:
         
         # If filepath doesn't contain wildcards, wrap with % for flexible matching
         if '%' not in filepath:
-            # Try exact match first
+            # Try exact match first - exclude full_content to return only metadata
             cursor = self.db.execute("""
-                SELECT * FROM files 
+                SELECT filepath, filename, overview, ddd_context, functions, exports, imports, 
+                       types_interfaces_classes, constants, dependencies, other_notes, 
+                       documented_at_commit, documented_at
+                FROM files 
                 WHERE dataset_id = ? AND filepath = ?
             """, (dataset_name, filepath))
             
@@ -751,9 +754,12 @@ class CodeQueryServer:
                 return None  # Query too broad for partial matching
             filepath = f'%{filepath}%'
         
-        # Use LIKE query for partial matching
+        # Use LIKE query for partial matching - exclude full_content to return only metadata
         cursor = self.db.execute("""
-            SELECT * FROM files 
+            SELECT filepath, filename, overview, ddd_context, functions, exports, imports, 
+                   types_interfaces_classes, constants, dependencies, other_notes, 
+                   documented_at_commit, documented_at
+            FROM files 
             WHERE dataset_id = ? AND filepath LIKE ?
             LIMIT ?
         """, (dataset_name, filepath, limit))
@@ -942,23 +948,51 @@ class CodeQueryServer:
         ]
         exclude_patterns.extend(default_excludes)
         
-        # Find all code files
+        # Find all code files - prefer git-tracked files when available
         code_extensions = ['.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.cpp', '.c', '.h', 
                           '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala', '.r', '.jl']
         
         all_files = []
-        for ext in code_extensions:
-            pattern = os.path.join(directory, f"**/*{ext}")
-            files = glob.glob(pattern, recursive=True)
+        
+        # Try to use git ls-files if we're in a git repository
+        try:
+            result = subprocess.run(
+                ["git", "ls-files", "--", directory],
+                cwd=self.cwd,
+                capture_output=True,
+                text=True,
+                check=True
+            )
             
-            # Filter out excluded patterns
-            filtered_files = []
-            for file in files:
-                rel_path = os.path.relpath(file, directory)
-                if not any(fnmatch.fnmatch(rel_path, pattern) for pattern in exclude_patterns):
-                    filtered_files.append(file)
-            
-            all_files.extend(filtered_files)
+            # Filter git-tracked files by extension and exclusion patterns
+            git_files = result.stdout.strip().split('\n') if result.stdout.strip() else []
+            for file_path in git_files:
+                if not file_path:  # Skip empty lines
+                    continue
+                    
+                # Check if it's a code file
+                _, ext = os.path.splitext(file_path.lower())
+                if ext in code_extensions:
+                    # Apply exclusion patterns
+                    if not any(fnmatch.fnmatch(file_path, pattern) for pattern in exclude_patterns):
+                        full_path = os.path.join(self.cwd, file_path)
+                        if os.path.exists(full_path):  # Ensure file still exists
+                            all_files.append(full_path)
+                            
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # Fallback to glob if git is not available or fails
+            for ext in code_extensions:
+                pattern = os.path.join(directory, f"**/*{ext}")
+                files = glob.glob(pattern, recursive=True)
+                
+                # Filter out excluded patterns
+                filtered_files = []
+                for file in files:
+                    rel_path = os.path.relpath(file, directory)
+                    if not any(fnmatch.fnmatch(rel_path, pattern) for pattern in exclude_patterns):
+                        filtered_files.append(file)
+                
+                all_files.extend(filtered_files)
         
         if not all_files:
             return {
@@ -2077,15 +2111,27 @@ exit 0
             # Use discovered dataset name or fall back to project name
             final_dataset_name = dataset_name_to_use or project_name
             
-            # Default source directory
+            # Default source directory - use git to determine what should be indexed
             if not source_directory:
-                # Check common patterns
-                for common_dir in ["src", "lib", "app", "."]:
-                    if os.path.exists(os.path.join(self.cwd, common_dir)):
-                        source_directory = common_dir
-                        break
-                else:
+                # If we're in a git repository, always index the full project
+                # since git tracks files across the entire repository
+                try:
+                    subprocess.run(
+                        ["git", "rev-parse", "--git-dir"],
+                        cwd=self.cwd,
+                        capture_output=True,
+                        check=True
+                    )
+                    # We're in a git repo, index everything
                     source_directory = "."
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    # Not a git repo, fall back to common patterns
+                    for common_dir in ["src", "lib", "app", "."]:
+                        if os.path.exists(os.path.join(self.cwd, common_dir)):
+                            source_directory = common_dir
+                            break
+                    else:
+                        source_directory = "."
             
             # Build recommendations
             setup_steps = []
