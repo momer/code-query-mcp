@@ -4,25 +4,45 @@ A Model Context Protocol (MCP) server that provides intelligent code search acro
 
 ## Quick Start
 
+### Option 1: Stdio Transport (Recommended)
+Single-threaded, managed by Claude automatically:
+
 1. **Install the MCP server:**
    ```bash
-   claude mcp add code-query -s user -- python ~/mcp-servers/code-query-mcp/run_server.py
+   claude mcp add code-query --command "python /path/to/code-query-mcp/server.py"
    ```
 
 2. **Restart Claude**
 
-3. **Setup your project:**
-   ```
-   "Use code-query MCP to recommend setup"
-   ```
-   
-   This will analyze your project and guide you through the setup process with exactly the commands you need.
+### Option 2: HTTP Transport (Advanced)
+Multi-threaded, supports concurrent requests:
 
-4. **Start searching:**
+1. **Start the server:**
+   ```bash
+   python /path/to/code-query-mcp/server.py --http 8000
    ```
-   "Use code-query MCP to search for 'authentication' in my_project"
-   "Use code-query MCP to get details for login.ts from my_project"
+
+2. **Add to Claude:**
+   ```bash
+   claude mcp add code-query --transport http --url http://127.0.0.1:8000/mcp
    ```
+
+3. **Restart Claude**
+
+### Using the Server
+
+Once installed, setup your project:
+```
+"Use code-query MCP to recommend setup"
+```
+
+This will analyze your project and guide you through the setup process with exactly the commands you need.
+
+Start searching:
+```
+"Use code-query MCP to search for 'authentication' in my_project"
+"Use code-query MCP to get details for login.ts from my_project"
+```
 
 ## Key Features
 
@@ -49,9 +69,20 @@ A Model Context Protocol (MCP) server that provides intelligent code search acro
    pip install -r requirements.txt
    ```
 
-2. **Add to Claude:**
+2. **Choose your transport and add to Claude:**
+
+   **Stdio Transport (Recommended):**
    ```bash
-   claude mcp add code-query -s user -- python ~/mcp-servers/code-query-mcp/run_server.py
+   claude mcp add code-query --command "python ~/mcp-servers/code-query-mcp/server.py"
+   ```
+
+   **HTTP Transport (for concurrent requests):**
+   ```bash
+   # First, start the server (keep this running)
+   python ~/mcp-servers/code-query-mcp/server.py --http 8000
+   
+   # Then add to Claude (in another terminal)
+   claude mcp add code-query --transport http --url http://127.0.0.1:8000/mcp
    ```
 
 3. **Verify:**
@@ -59,6 +90,16 @@ A Model Context Protocol (MCP) server that provides intelligent code search acro
    claude mcp list
    claude "Use the code-query MCP to check its status"
    ```
+
+### Transport Comparison
+
+| Feature | Stdio Transport | HTTP Transport |
+|---------|----------------|----------------|
+| **Setup** | Simple - Claude manages process | Manual - keep server running |
+| **Concurrency** | Single request at a time | Multiple concurrent requests |
+| **Use Case** | Personal development | Production/team use |
+| **Reliability** | High - managed by Claude | Manual process management |
+| **Port Management** | None needed | Requires available port |
 
 ## Common Usage Patterns
 
@@ -112,9 +153,36 @@ Each git worktree gets its own dataset (e.g., `my-project-feature-branch`), auto
 
 ## Troubleshooting
 
+### General Issues
 **MCP not recognized:** Restart Claude after installation  
 **No search results:** Verify dataset name with `list_datasets`  
 **Setup issues:** Use `recommend_setup` for guided configuration
+
+### Stdio Transport Issues
+**"Command not found":** Ensure Python path is correct in the command  
+**"Permission denied":** Make sure `server.py` is executable or use `python server.py`  
+**Server won't start:** Check Python dependencies with `pip install -r requirements.txt`
+
+### HTTP Transport Issues
+**"Connection refused":** Ensure the server is running with `python server.py --http 8000`  
+**"Port already in use":** Use a different port: `python server.py --http 8001`  
+**Server stops unexpectedly:** Check server logs for errors, restart with `python server.py --http 8000`  
+**CORS errors:** The server is configured for localhost access only - this is expected
+
+### Switching Between Transports
+To switch from stdio to HTTP:
+```bash
+claude mcp remove code-query
+python server.py --http 8000  # Start HTTP server
+claude mcp add code-query --transport http --url http://127.0.0.1:8000/mcp
+```
+
+To switch from HTTP to stdio:
+```bash
+claude mcp remove code-query
+# Stop the HTTP server (Ctrl+C)
+claude mcp add code-query --command "python ~/mcp-servers/code-query-mcp/server.py"
+```
 
 ---
 
