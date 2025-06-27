@@ -245,8 +245,8 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
 
-async def main():
-    """Main entry point."""
+def setup_query_server():
+    """Setup and configure the query server."""
     # Setup database connection
     query_server.setup_database()
     
@@ -312,8 +312,45 @@ async def main():
         query_server.active_dataset = active_dataset_name
     else:
         logging.info("No active dataset configured. Tools will require explicit dataset names.")
+
+def main_sync():
+    """Main entry point for sync execution."""
+    # Check command line arguments for transport type
+    import sys
     
-    # Run the server
+    transport_mode = "stdio"  # default
+    http_port = 8000
+    http_host = "127.0.0.1"
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--http":
+            transport_mode = "http"
+            if len(sys.argv) > 2:
+                http_port = int(sys.argv[2])
+            if len(sys.argv) > 3:
+                http_host = sys.argv[3]
+    
+    # Setup query server
+    setup_query_server()
+    
+    # Run the server based on transport mode
+    if transport_mode == "http":
+        # Import and start HTTP server
+        from http_server import start_http_server
+        logging.info(f"Starting HTTP server on {http_host}:{http_port}")
+        start_http_server(query_server, http_host, http_port)
+    else:
+        # Use stdio transport (default) - run in async mode
+        import asyncio
+        asyncio.run(main_async())
+
+async def main_async():
+    """Main entry point for async stdio execution."""
+    # Setup query server
+    setup_query_server()
+    
+    # Use stdio transport (default)
+    logging.info("Starting stdio server")
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
@@ -330,5 +367,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main_sync()
