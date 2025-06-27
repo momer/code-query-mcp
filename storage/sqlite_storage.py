@@ -2374,7 +2374,11 @@ exit 0
             for last_commit, files in files_by_commit.items():
                 changed_files_since_commit = set(get_changed_files_since_commit(last_commit, self.cwd))
                 for file_row in files:
-                    if file_row['filepath'] in changed_files_since_commit:
+                    # Normalize database filepath to match git output format
+                    db_filepath = file_row['filepath']
+                    normalized_filepath = db_filepath.lstrip('./')  # Remove leading ./
+                    
+                    if normalized_filepath in changed_files_since_commit:
                         files_needing_catchup.append({
                             "filepath": file_row['filepath'],
                             "reason": "file_changed",
