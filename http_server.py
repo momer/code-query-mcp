@@ -165,7 +165,19 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
         
         # Process the request
         try:
+            # Debug logging
+            logger.info(f"Received MCP request: {json.dumps(request_json, indent=2)}")
             response = self._handle_mcp_request(request_json, session_id)
+            
+            # Handle notifications that don't need a response
+            if response is None:
+                logger.info("No response needed (notification)")
+                self.send_response(200)
+                self._send_cors_headers()
+                self.end_headers()
+                return
+            
+            logger.info(f"Sending MCP response: {json.dumps(response, indent=2)}")
             
             # Send response
             self.send_response(200)
@@ -216,10 +228,10 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "result": {
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": "2025-03-26",
                         "capabilities": {
                             "tools": {
-                                "listChanged": False
+                                "listChanged": True
                             }
                         },
                         "serverInfo": {
@@ -235,9 +247,14 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "result": {
-                        "tools": [tool.dict() for tool in tools]
+                        "tools": [tool.model_dump() for tool in tools]
+                        # Note: nextCursor is omitted when there are no more pages
                     }
                 }
+            
+            elif method == 'notifications/initialized':
+                # Client has completed initialization - no response needed for notifications
+                return None
             
             elif method == 'tools/call':
                 tool_name = params.get('name', '')
@@ -247,7 +264,8 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "result": {
-                        "content": [content.dict() for content in result]
+                        "content": [content.model_dump() for content in result],
+                        "isError": False
                     }
                 }
             
