@@ -9,7 +9,7 @@ Single-threaded, managed by Claude automatically:
 
 1. **Install the MCP server:**
    ```bash
-   claude mcp add code-query --command "python /path/to/code-query-mcp/server.py"
+   claude mcp add -s user code-query -- python /path/to/code-query-mcp/server.py
    ```
 
 2. **Restart Claude**
@@ -24,7 +24,7 @@ Multi-threaded, supports concurrent requests:
 
 2. **Add to Claude:**
    ```bash
-   claude mcp add code-query --transport http --url http://127.0.0.1:8000/mcp
+   claude mcp add -s user --transport http code-query http://127.0.0.1:8000/mcp
    ```
 
 3. **Restart Claude**
@@ -73,7 +73,7 @@ Start searching:
 
    **Stdio Transport (Recommended):**
    ```bash
-   claude mcp add code-query --command "python ~/mcp-servers/code-query-mcp/server.py"
+   claude mcp add -s user code-query "python ~/mcp-servers/code-query-mcp/server.py"
    ```
 
    **HTTP Transport (for concurrent requests):**
@@ -82,7 +82,7 @@ Start searching:
    python ~/mcp-servers/code-query-mcp/server.py --http 8000
    
    # Then add to Claude (in another terminal)
-   claude mcp add code-query --transport http --url http://127.0.0.1:8000/mcp
+   claude mcp add -s user --transport http code-query http://127.0.0.1:8000/mcp
    ```
 
 3. **Verify:**
@@ -174,14 +174,14 @@ To switch from stdio to HTTP:
 ```bash
 claude mcp remove code-query
 python server.py --http 8000  # Start HTTP server
-claude mcp add code-query --transport http --url http://127.0.0.1:8000/mcp
+claude mcp add -s user --transport http code-query http://127.0.0.1:8000/mcp
 ```
 
 To switch from HTTP to stdio:
 ```bash
 claude mcp remove code-query
 # Stop the HTTP server (Ctrl+C)
-claude mcp add code-query --command "python ~/mcp-servers/code-query-mcp/server.py"
+claude mcp add -s user code-query "python ~/mcp-servers/code-query-mcp/server.py"
 ```
 
 ---
