@@ -2432,11 +2432,12 @@ exit 0
                 }
             
             # Update the commit hash
-            self.db.execute("""
-                UPDATE files 
-                SET documented_at_commit = ?
-                WHERE dataset_id = ? AND filepath = ?
-            """, (commit_hash, dataset_name, filepath))
+            with self.db:
+                self.db.execute("""
+                    UPDATE files 
+                    SET documented_at_commit = ?
+                    WHERE dataset_id = ? AND filepath = ?
+                """, (commit_hash, dataset_name, filepath))
             
             return {
                 "success": True,
@@ -2497,11 +2498,12 @@ exit 0
                 }
             
             # Update all files in a single, efficient query
-            self.db.execute("""
-                UPDATE files 
-                SET documented_at_commit = ?
-                WHERE dataset_id = ? AND documented_at_commit IS NULL
-            """, (commit_hash, dataset_name))
+            with self.db:
+                self.db.execute("""
+                    UPDATE files 
+                    SET documented_at_commit = ?
+                    WHERE dataset_id = ? AND documented_at_commit IS NULL
+                """, (commit_hash, dataset_name))
             
             return {
                 "success": True,
