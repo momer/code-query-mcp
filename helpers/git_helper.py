@@ -240,3 +240,89 @@ def get_changed_files_since_commit(commit_hash: str, cwd: str = None) -> list[st
         return [line.strip() for line in result.split('\n') if line.strip()]
     except subprocess.CalledProcessError:
         return []
+
+
+def install_git_hooks(project_root: str) -> bool:
+    """
+    Install or update git hooks for the project.
+    
+    Args:
+        project_root: Path to project root
+        
+    Returns:
+        bool: True if installation successful
+    """
+    # Get actual git directory (handles worktrees)
+    git_dir = get_actual_git_dir(project_root)
+    if not git_dir:
+        logging.error("Not a git repository")
+        return False
+    
+    # For worktrees, git_dir might be a file pointing to the actual location
+    # We need to find the hooks directory
+    if os.path.isfile(git_dir):
+        # Read the gitdir file to get the actual location
+        try:
+            with open(git_dir, 'r') as f:
+                gitdir_content = f.read().strip()
+                if gitdir_content.startswith('gitdir: '):
+                    actual_git_dir = gitdir_content[8:]
+                    if not os.path.isabs(actual_git_dir):
+                        actual_git_dir = os.path.join(os.path.dirname(git_dir), actual_git_dir)
+                    git_hooks_dir = os.path.join(actual_git_dir, 'hooks')
+                else:
+                    git_hooks_dir = os.path.join(git_dir, 'hooks')
+        except IOError:
+            git_hooks_dir = os.path.join(git_dir, 'hooks')
+    else:
+        git_hooks_dir = os.path.join(git_dir, 'hooks')
+    
+    if not os.path.exists(git_hooks_dir):
+        os.makedirs(git_hooks_dir, exist_ok=True)
+    
+    # Post-commit hook content - safer approach using module execution
+    hook_content = '''#!/usr/bin/env python3
+import sys
+import os
+import subprocess
+
+# Find project root from git
+try:
+    project_root = subprocess.check_output(
+        ['git', 'rev-parse', '--show-toplevel'],
+        text=True,
+        stderr=subprocess.PIPE
+    ).strip()
+except (subprocess.CalledProcessError, FileNotFoundError):
+    # Fallback if git command fails inside hook
+    git_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    project_root = os.path.dirname(git_dir)
+
+# Execute handler as a module - safer than sys.path manipulation
+env = os.environ.copy()
+env['PYTHONPATH'] = project_root + os.pathsep + env.get('PYTHONPATH', '')
+
+proc = subprocess.run(
+    [sys.executable, '-m', 'helpers.git_hook_handler'],
+    cwd=project_root,
+    env=env
+)
+sys.exit(proc.returncode)
+'''
+    
+    hook_path = os.path.join(git_hooks_dir, 'post-commit')
+    
+    try:
+        # Write hook file
+        with open(hook_path, 'w') as f:
+            f.write(hook_content)
+        
+        # Make executable
+        os.chmod(hook_path, 0o755)
+        
+        logging.info(f"✓ Installed post-commit hook at {hook_path}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"✗ Failed to install hook: {e}")
+        return False
