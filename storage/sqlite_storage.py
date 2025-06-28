@@ -419,6 +419,35 @@ class CodeQueryServer:
             "errors": errors if errors else None
         }
     
+    def _build_fts5_query(self, query: str) -> str:
+        """Build optimized FTS5 query with smart handling of operators and phrases."""
+        import re
+        
+        # If query is already complex FTS5 syntax, use it directly with minimal sanitization
+        if any(op in query.upper() for op in ['NEAR(', 'OR', 'AND', 'NOT']) or '"' in query:
+            # Just escape problematic quotes and return
+            return query.replace('"', '""')
+        
+        # Handle simple multi-word queries intelligently
+        words = query.strip().split()
+        
+        if len(words) == 1:
+            # Single word - use as-is with prefix matching support
+            word = re.sub(r'[^\w*.-]', '', words[0])
+            return word
+        elif len(words) == 2:
+            # Two words - try phrase first, then proximity search as fallback
+            phrase = f'"{" ".join(words)}"'
+            # Also try proximity search with NEAR for better matches
+            proximity = f'NEAR("{words[0]}" "{words[1]}", 10)'
+            return f'({phrase} OR {proximity})'
+        else:
+            # Multiple words - use phrase query for exact match, 
+            # plus individual terms for broader matching
+            phrase = f'"{" ".join(words)}"'
+            individual_terms = " ".join(words)
+            return f'({phrase} OR ({individual_terms}))'
+    
     def search_files(self, query: str, dataset_name: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Search files in dataset using FTS5 or fallback to LIKE."""
         if not self.db:
@@ -437,24 +466,34 @@ class CodeQueryServer:
         """)
         
         if cursor.fetchone():
-            # Use FTS5 for search
-            # Sanitize query for FTS5 by escaping special characters
-            import re
-            # Remove potentially problematic characters and escape quotes
-            fts_query = re.sub(r'[^\w\s".-]', ' ', query)
-            fts_query = fts_query.replace('"', '""')  # Escape quotes
-            fts_query = fts_query.strip()
+            # Use FTS5 for search with improved query building
+            fts_query = self._build_fts5_query(query)
             
-            cursor = self.db.execute("""
-                SELECT DISTINCT f.filepath, f.filename, f.overview, f.ddd_context,
-                       snippet(files_fts, 2, '[MATCH]', '[/MATCH]', '...', 64) as match_snippet
-                FROM files f
-                JOIN files_fts ON f.rowid = files_fts.rowid
-                WHERE files_fts MATCH ?
-                AND f.dataset_id = ?
-                ORDER BY rank
-                LIMIT ?
-            """, (fts_query, dataset_name, limit))
+            try:
+                cursor = self.db.execute("""
+                    SELECT DISTINCT f.filepath, f.filename, f.overview, f.ddd_context,
+                           snippet(files_fts, 2, '[MATCH]', '[/MATCH]', '...', 64) as match_snippet
+                    FROM files f
+                    JOIN files_fts ON f.rowid = files_fts.rowid
+                    WHERE files_fts MATCH ?
+                    AND f.dataset_id = ?
+                    ORDER BY bm25(files_fts)
+                    LIMIT ?
+                """, (fts_query, dataset_name, limit))
+            except Exception as e:
+                # If complex query fails, fall back to simple search
+                logging.warning(f"FTS5 query failed, using simple search: {e}")
+                simple_query = ' '.join(query.split())  # Basic word tokenization
+                cursor = self.db.execute("""
+                    SELECT DISTINCT f.filepath, f.filename, f.overview, f.ddd_context,
+                           snippet(files_fts, 2, '[MATCH]', '[/MATCH]', '...', 64) as match_snippet
+                    FROM files f
+                    JOIN files_fts ON f.rowid = files_fts.rowid
+                    WHERE files_fts MATCH ?
+                    AND f.dataset_id = ?
+                    ORDER BY bm25(files_fts)
+                    LIMIT ?
+                """, (simple_query, dataset_name, limit))
         else:
             # Fallback to LIKE search
             like_query = f"%{query}%"

@@ -1,0 +1,10 @@
+HTTP/1.0 200 OK
+Server: BaseHTTP/0.6 Python/3.13.0
+Date: Fri, 27 Jun 2025 02:24:49 GMT
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS
+Access-Control-Allow-Headers: Content-Type, Authorization, Accept, Mcp-Session-Id, MCP-Protocol-Version
+Access-Control-Max-Age: 3600
+Content-Type: application/json
+Mcp-Session-Id: f7cadf60-8fbf-43ab-993d-9f927fb08cd2
+

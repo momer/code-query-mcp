@@ -6,9 +6,24 @@ import logging
 from typing import Dict, Any, Optional, List
 from storage.sqlite_storage import CodeQueryServer
 
-# Configure logging for tasks
+# Configure logging at module level for Huey consumer
+log_dir = os.path.join(os.getcwd(), '.code-query')
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'worker.log')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()  # Also log to console
+    ]
+)
+
 logger = logging.getLogger('code-query.tasks')
-logger.setLevel(logging.INFO)
+
+# Define a reasonable limit for batch processing
+MAX_BATCH_SIZE = 1000
 
 # Initialize Huey with SQLite backend
 # This creates a separate database for job queue management
@@ -50,12 +65,26 @@ def process_file_documentation(
         # Construct absolute file path
         abs_filepath = os.path.join(project_root, filepath)
         
+        # Security: Prevent path traversal attacks
+        resolved_project_root = os.path.realpath(project_root)
+        resolved_filepath = os.path.realpath(abs_filepath)
+        
+        # Ensure the root path ends with a separator for a robust check
+        # This prevents matching '/app/project_evil' if root is '/app/project'
+        safe_project_root = os.path.join(resolved_project_root, '')
+        
+        if not resolved_filepath.startswith(safe_project_root):
+            error_msg = f"Security violation: Attempted to access file outside of project root: {filepath}"
+            logger.error(error_msg)
+            # Do not retry this, it's a permanent failure
+            return {"success": False, "filepath": filepath, "error": error_msg}
+        
         # Call Claude to analyze the file
         result = subprocess.run([
             'claude', 
-            '--prompt', f'Analyze and document the code in {filepath}. Focus on its purpose, main functions, exports, imports, and key implementation details.',
+            '--prompt', f'Analyze and document the code in {resolved_filepath}. Focus on its purpose, main functions, exports, imports, and key implementation details.',
             '--model', model,
-            '--file', abs_filepath
+            '--file', resolved_filepath
         ], capture_output=True, text=True, cwd=project_root)
         
         if result.returncode == 0:
@@ -76,13 +105,19 @@ def process_file_documentation(
             logger.info(f"✓ Completed documentation for {filepath}")
             return {"success": True, "filepath": filepath}
         else:
-            error_msg = f"Claude processing failed: {result.stderr}"
-            logger.error(f"✗ Failed to document {filepath}: {error_msg}")
+            # This is a retriable error. Raise an exception to trigger Huey's retry.
+            error_msg = f"Claude processing failed with exit code {result.returncode}: {result.stderr}"
+            logger.error(f"✗ Failed to document {filepath}: {error_msg}. Will retry.")
             raise Exception(error_msg)
             
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        # Non-retriable error: config/file not found or config is corrupt
+        logger.error(f"✗ Non-retriable error for {filepath}: {e}")
+        return {"success": False, "filepath": filepath, "error": f"Non-retriable error: {e}"}
     except Exception as e:
-        logger.error(f"✗ Error processing {filepath}: {str(e)}")
-        return {"success": False, "filepath": filepath, "error": str(e)}
+        # Let other exceptions propagate for retry
+        logger.error(f"✗ Unexpected error processing {filepath}: {e}")
+        raise
 
 @huey.task()
 def process_documentation_batch(
@@ -91,26 +126,30 @@ def process_documentation_batch(
     project_root: str
 ) -> Dict[str, Any]:
     """
-    Process multiple files as a batch.
-    Useful for reducing overhead when processing many files.
+    Enqueue multiple files for processing.
+    Each file is enqueued as a separate task for parallel processing.
     """
-    results = []
+    if len(files) > MAX_BATCH_SIZE:
+        logger.warning(f"Batch size {len(files)} exceeds limit of {MAX_BATCH_SIZE}. Rejecting.")
+        return {
+            "status": "rejected",
+            "error": f"Batch size exceeds limit of {MAX_BATCH_SIZE}"
+        }
+    
+    logger.info(f"Enqueuing batch of {len(files)} files for processing.")
+    
     for file_info in files:
-        result = process_file_documentation(
+        # Enqueue each file as a separate task
+        process_file_documentation(
             filepath=file_info['filepath'],
             dataset_name=dataset_name,
             commit_hash=file_info['commit_hash'],
             project_root=project_root
         )
-        results.append(result)
-    
-    successful = sum(1 for r in results if r.get('success', False))
-    logger.info(f"Batch complete: {successful}/{len(files)} files processed successfully")
     
     return {
-        "total": len(files),
-        "successful": successful,
-        "results": results
+        "status": "enqueued",
+        "count": len(files)
     }
 
 def parse_claude_response(response: str) -> Dict[str, Any]:
@@ -131,17 +170,3 @@ def parse_claude_response(response: str) -> Dict[str, Any]:
         "other_notes": []
     }
 
-# Add file handler for worker logs - will be initialized when worker starts
-def setup_logging(project_root: str):
-    """
-    Set up logging for the worker process.
-    Should be called when the worker starts.
-    """
-    log_dir = os.path.join(project_root, '.code-query')
-    os.makedirs(log_dir, exist_ok=True)
-    
-    handler = logging.FileHandler(os.path.join(log_dir, 'worker.log'))
-    handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    ))
-    logger.addHandler(handler)
