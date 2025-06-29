@@ -5,6 +5,7 @@ import signal
 import time
 import json
 from typing import Optional, Tuple
+from collections import deque
 import psutil
 
 class WorkerManager:
@@ -80,23 +81,25 @@ class WorkerManager:
                     f.write(str(worker_pid))
                 os.replace(temp_pid_file, self.pid_file)
                 
-                # Give the worker a moment to start
-                time.sleep(2)
+                # Give the worker a moment to start and verify
+                worker_running = False
+                for _ in range(5):  # Check for up to 5 seconds
+                    time.sleep(1)
+                    if psutil.pid_exists(worker_pid):
+                        try:
+                            proc = psutil.Process(worker_pid)
+                            if 'huey' in ' '.join(proc.cmdline()):
+                                worker_running = True
+                                break
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue  # Process might be starting up
                 
-                # Verify it's still running
-                if psutil.pid_exists(worker_pid):
-                    # Double-check it's our process
-                    try:
-                        proc = psutil.Process(worker_pid)
-                        cmdline = ' '.join(proc.cmdline())
-                        if 'huey' in cmdline:
-                            print(f"✓ Worker started successfully (PID: {worker_pid})")
-                            print(f"  Log file: {self.log_file}")
-                            return True
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
+                if worker_running:
+                    print(f"✓ Worker started successfully (PID: {worker_pid})")
+                    print(f"  Log file: {self.log_file}")
+                    return True
                 
-                print("✗ Worker process died immediately after starting")
+                print("✗ Worker process died or failed to start")
                 print(f"  Check log file: {self.log_file}")
                 self._cleanup_pid_file()
                 return False
@@ -222,8 +225,9 @@ class WorkerManager:
                 print("\nRecent log entries:")
                 print("-" * 40)
                 with open(self.log_file, 'r') as f:
-                    lines = f.readlines()
-                    for line in lines[-5:]:  # Last 5 lines
+                    # Efficiently get the last 5 lines without reading the whole file into memory
+                    last_five_lines = deque(f, 5)
+                    for line in last_five_lines:
                         print(f"  {line.rstrip()}")
             except IOError:
                 print(f"Log file: <error reading {self.log_file}>")

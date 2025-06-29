@@ -40,8 +40,8 @@ class GitHookHandler:
             mode = processing_config.get('mode', 'manual')
             fallback_to_sync = processing_config.get('fallback_to_sync', True)
             
-            # Load queued files (snapshot at start)
-            queued_files = self._load_queue_snapshot()
+            # Atomically load and clear the queue
+            queued_files = self._load_queue_snapshot_and_clear()
             if not queued_files:
                 # No files to process
                 return 0
@@ -88,20 +88,38 @@ class GitHookHandler:
             print(f"⚠️  Error loading config: {e}")
             return None
     
-    def _load_queue_snapshot(self) -> List[Dict[str, str]]:
+    def _load_queue_snapshot_and_clear(self) -> List[Dict[str, str]]:
         """
-        Load and snapshot the current queue.
-        This prevents race conditions with concurrent commits.
+        Atomically reads and clears the queue to prevent race conditions.
+        It does this by renaming the queue file, which is an atomic operation.
         """
         if not os.path.exists(self.queue_file):
             return []
+
+        # Create a unique temporary path for the snapshot
+        snapshot_path = self.queue_file + f".snapshot.{os.getpid()}.{time.time()}"
         
         try:
-            with open(self.queue_file, 'r') as f:
+            # Atomically move the queue file to our snapshot path
+            os.rename(self.queue_file, snapshot_path)
+        except FileNotFoundError:
+            # Another process beat us to it, the queue is empty.
+            return []
+
+        try:
+            with open(snapshot_path, 'r') as f:
                 data = json.load(f)
                 return data.get('files', [])
         except (json.JSONDecodeError, IOError):
+            # If the snapshot is corrupted, return an empty list.
+            # The corrupted file will remain for inspection but won't be re-processed.
             return []
+        finally:
+            # Clean up the snapshot file after reading
+            try:
+                os.remove(snapshot_path)
+            except OSError:
+                pass  # Ignore errors if file is already gone
     
     def _is_worker_running(self) -> bool:
         """Check if the background worker is running."""
@@ -150,8 +168,9 @@ class GitHookHandler:
             # Security check: Ensure file is within project root
             abs_filepath = os.path.join(self.project_root, filepath)
             real_filepath = os.path.realpath(abs_filepath)
+            real_project_root = os.path.realpath(self.project_root)
             
-            if not real_filepath.startswith(os.path.join(self.project_root, '')):
+            if os.path.commonpath([real_filepath, real_project_root]) != real_project_root:
                 print(f"  ⚠️  Skipping {filepath} (outside project)")
                 continue
             
@@ -166,26 +185,21 @@ class GitHookHandler:
                 with open(real_filepath, 'r', encoding='utf-8') as f:
                     file_content = f.read()
                 
-                # Use Claude directly with content
-                prompt = f"""Analyze and document this code file: {filepath}
+                # Use Claude directly with content - request JSON-only output
+                prompt = f"""Analyze the following code file and return ONLY a single, valid JSON object. Do not include any other text, explanations, or markdown formatting.
 
-Focus on:
-- Purpose and functionality
-- Main functions/methods
-- Imports and exports
-- Key implementation details
+The JSON object must have these fields:
+- overview: string (brief file description)
+- functions: object (mapping function names to descriptions)
+- imports: object (imported items)
+- exports: object (exported items)  
+- types_interfaces_classes: object (type definitions)
+- constants: object (constant definitions)
+- dependencies: array (external dependencies)
+- other_notes: array (additional notes)
 
-Return a JSON object with these fields:
-- overview: Brief description
-- functions: Object mapping function names to descriptions
-- imports: Object of imports
-- exports: Object of exports
-- types_interfaces_classes: Object of type definitions
-- constants: Object of constants
-- dependencies: Array of external dependencies
-- other_notes: Array of additional notes
-
-File content:
+File: {filepath}
+Content:
 {file_content}"""
                 
                 result = subprocess.run([
@@ -198,27 +212,45 @@ File content:
                     print(" ✓")
                     # Parse and save documentation
                     try:
-                        # Parse JSON from Claude's response
+                        # Attempt to parse the entire output as JSON
+                        doc_data = json.loads(result.stdout.strip())
+                        
+                        # Update database
+                        from storage.sqlite_storage import CodeQueryServer
+                        storage = CodeQueryServer(os.path.join(self.project_root, '.code-query', 'code_data.db'))
+                        storage.update_file_documentation(
+                            dataset_name=dataset_name,
+                            filepath=filepath,
+                            commit_hash=commit_hash,
+                            **doc_data
+                        )
+                        completed.append(file_info)
+                    except json.JSONDecodeError:
+                        # If direct parsing fails, try to extract JSON
                         import re
-                        json_match = re.search(r'\{.*\}', result.stdout, re.DOTALL)
+                        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', result.stdout, re.DOTALL)
                         if json_match:
-                            doc_data = json.loads(json_match.group())
-                            
-                            # Update database
-                            from storage.sqlite_storage import CodeQueryServer
-                            storage = CodeQueryServer(os.path.join(self.project_root, '.code-query', 'code_data.db'))
-                            storage.update_file_documentation(
-                                dataset_name=dataset_name,
-                                filepath=filepath,
-                                commit_hash=commit_hash,
-                                **doc_data
-                            )
-                            completed.append(file_info)
+                            try:
+                                doc_data = json.loads(json_match.group())
+                                
+                                # Update database
+                                from storage.sqlite_storage import CodeQueryServer
+                                storage = CodeQueryServer(os.path.join(self.project_root, '.code-query', 'code_data.db'))
+                                storage.update_file_documentation(
+                                    dataset_name=dataset_name,
+                                    filepath=filepath,
+                                    commit_hash=commit_hash,
+                                    **doc_data
+                                )
+                                completed.append(file_info)
+                            except Exception as e:
+                                print(f" ✗ (parse error: {e})")
+                                failed.append(file_info)
                         else:
-                            print(f" ✗ (invalid response format)")
+                            print(f" ✗ (invalid JSON response)")
                             failed.append(file_info)
                     except Exception as e:
-                        print(f" ✗ (parse error: {e})")
+                        print(f" ✗ (error: {e})")
                         failed.append(file_info)
                 else:
                     print(f" ✗ (claude error)")
@@ -228,8 +260,7 @@ File content:
                 print(f" ✗ ({e})")
                 failed.append(file_info)
         
-        # Update queue to remove completed files
-        self._update_queue(completed)
+        # Queue was already cleared atomically, no need to update
         
         # Summary
         print(f"\n✓ Documentation updated ({len(completed)} files processed)")
@@ -267,8 +298,7 @@ File content:
                 )
                 task_ids.append(str(task.id))
             
-            # Clear the queue since we've enqueued everything
-            self._clear_queue()
+            # Queue was already cleared atomically, no need to clear again
             
             print(f"✓ {len(files)} file(s) queued for background processing")
             print(f"  Monitor progress: tail -f {os.path.join(self.project_root, '.code-query', 'logs', 'worker.log')}")
