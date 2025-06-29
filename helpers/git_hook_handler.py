@@ -4,8 +4,11 @@ import sys
 import json
 import time
 import fcntl
+import subprocess
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
+
+from helpers.worker_detector import is_worker_running
 
 
 class GitHookHandler:
@@ -128,24 +131,7 @@ class GitHookHandler:
     
     def _is_worker_running(self) -> bool:
         """Check if the background worker is running."""
-        if not os.path.exists(self.pid_file):
-            return False
-        
-        try:
-            with open(self.pid_file, 'r') as f:
-                pid = int(f.read().strip())
-            
-            # Use basic os.kill with signal 0 to check if process exists
-            # This works cross-platform without requiring psutil in hooks
-            try:
-                os.kill(pid, 0)
-                return True
-            except OSError:
-                # Process doesn't exist
-                return False
-                
-        except (ValueError, IOError):
-            return False
+        return is_worker_running(self.project_root)
     
     def _process_synchronously(self, files: List[Dict[str, str]], config: Dict) -> int:
         """
@@ -158,7 +144,6 @@ class GitHookHandler:
         Returns:
             int: Exit code
         """
-        import subprocess
         
         dataset_name = config.get('dataset_name', 'default')
         model = config.get('model', 'claude-3-5-sonnet-20240620')
@@ -170,9 +155,13 @@ class GitHookHandler:
             filepath = file_info['filepath']
             
             # Validate file path to prevent traversal attacks
-            abs_project_root = os.path.abspath(self.project_root)
-            abs_filepath = os.path.abspath(os.path.join(abs_project_root, filepath))
+            # Use os.path.realpath to resolve all symbolic links and get the canonical path.
+            # This ensures we are checking the actual physical location of the file.
+            abs_project_root = os.path.realpath(self.project_root)
+            abs_filepath = os.path.realpath(os.path.join(abs_project_root, filepath))
             
+            # Ensure the resolved file path starts with the resolved project root path.
+            # The os.sep is crucial to prevent cases like /project_root_abc matching /project_root_abcd.
             if not abs_filepath.startswith(abs_project_root + os.sep):
                 print(f"  Processing {filepath}... ✗ (Security: Attempted to access file outside project root)")
                 failed.append(file_info)
@@ -290,7 +279,6 @@ class GitHookHandler:
 def handle_post_commit() -> int:
     """Entry point for post-commit hook."""
     # Get git repository root
-    import subprocess
     result = subprocess.run(
         ['git', 'rev-parse', '--show-toplevel'],
         capture_output=True,
