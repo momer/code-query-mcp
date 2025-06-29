@@ -151,6 +151,64 @@ When you commit changes, files are automatically queued for documentation update
 ### Worktree Support
 Each git worktree gets its own dataset (e.g., `my-project-feature-branch`), automatically forked from main on first use.
 
+## Background Queue Processing
+
+Code Query MCP now supports automated background processing of documentation updates, providing:
+
+- **Instant commits** - No waiting for documentation generation
+- **Background processing** - Updates happen asynchronously
+- **Better performance** - Handle large codebases efficiently
+- **Graceful fallback** - Works even if background worker isn't running
+
+### Quick Start
+
+1. **Setup queue processing:**
+   ```bash
+   python cli.py worker setup
+   ```
+
+2. **Start the background worker:**
+   ```bash
+   python cli.py worker start
+   ```
+
+3. **Make commits as usual:**
+   ```bash
+   git add .
+   git commit -m "Your changes"
+   # Files are queued for background processing automatically
+   ```
+
+### Configuration
+
+Queue processing is configured in `.code-query/config.json`:
+
+```json
+{
+  "processing": {
+    "mode": "auto",              // "auto" or "manual"
+    "fallback_to_sync": true,    // Process synchronously if worker not running
+    "batch_size": 5,             // Files per batch
+    "retry_attempts": 2,         // Retry failed files
+    "retry_delay": 60            // Seconds between retries
+  }
+}
+```
+
+### Worker Commands
+
+```bash
+python cli.py worker start    # Start background worker
+python cli.py worker stop     # Stop background worker
+python cli.py worker restart  # Restart worker
+python cli.py worker status   # Check worker status
+```
+
+### Processing Modes
+
+- **Manual Mode**: Always processes files synchronously during commit
+- **Auto Mode**: Uses background worker if running, falls back to sync if configured
+
 ## Troubleshooting
 
 ### General Issues
