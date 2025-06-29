@@ -3,23 +3,23 @@ import os
 import sys
 import json
 import time
-import fcntl
-import subprocess
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
-
-from helpers.worker_detector import is_worker_running
-
 
 class GitHookHandler:
     """Handles git hook logic for code-query documentation updates."""
     
     def __init__(self, project_root: str):
-        self.project_root = project_root
-        self.config_path = os.path.join(project_root, '.code-query', 'config.json')
-        self.queue_file = os.path.join(project_root, '.code-query', 'file_queue.json')
-        self.pid_file = os.path.join(project_root, '.code-query', 'worker.pid')
-        self.lock_file = os.path.join(project_root, '.code-query', 'queue.lock')
+        # Validate and normalize project root
+        self.project_root = os.path.realpath(project_root)
+        if not os.path.isdir(self.project_root):
+            raise ValueError(f"Invalid project root: {project_root}")
+        
+        # Define paths securely
+        self.code_query_dir = os.path.join(self.project_root, '.code-query')
+        self.config_path = os.path.join(self.code_query_dir, 'config.json')
+        self.queue_file = os.path.join(self.code_query_dir, 'file_queue.json')
+        self.pid_file = os.path.join(self.code_query_dir, 'worker.pid')
     
     def handle_post_commit(self) -> int:
         """
@@ -32,7 +32,7 @@ class GitHookHandler:
             # Load configuration
             config = self._load_config()
             if not config:
-                print("⚠️  Code-query not configured. Run: python server.py worker setup")
+                print("⚠️  Code-query not configured. Run: python cli.py worker setup")
                 return 0  # Don't block commit
             
             # Get processing mode
@@ -40,10 +40,10 @@ class GitHookHandler:
             mode = processing_config.get('mode', 'manual')
             fallback_to_sync = processing_config.get('fallback_to_sync', True)
             
-            # Atomically get and clear queued files
-            queued_files = self._atomic_read_and_clear_queue()
+            # Load queued files (snapshot at start)
+            queued_files = self._load_queue_snapshot()
             if not queued_files:
-                # No files to process or another hook is handling them
+                # No files to process
                 return 0
             
             print(f"\n📄 Processing {len(queued_files)} file(s) for documentation...")
@@ -62,12 +62,12 @@ class GitHookHandler:
                     # Worker not running
                     if fallback_to_sync:
                         print("⚠️  Background worker not running, processing synchronously...")
-                        print("  💡 Start worker with: python server.py worker start")
+                        print("  💡 Start worker with: python cli.py worker start")
                         return self._process_synchronously(queued_files, config)
                     else:
                         print("✗ Background worker not running")
-                        print("  💡 Start worker with: python server.py worker start")
-                        print("  💡 Or enable fallback: python server.py worker config --fallback")
+                        print("  💡 Start worker with: python cli.py worker start")
+                        print("  💡 Or enable fallback: python cli.py worker config --fallback")
                         # Don't process, but don't fail the commit
                         return 0
             
@@ -88,32 +88,6 @@ class GitHookHandler:
             print(f"⚠️  Error loading config: {e}")
             return None
     
-    def _atomic_read_and_clear_queue(self) -> List[Dict[str, str]]:
-        """Atomically reads and clears the queue to prevent race conditions."""
-        if not os.path.exists(self.queue_file):
-            return []
-        
-        # Ensure lock directory exists
-        os.makedirs(os.path.dirname(self.lock_file), exist_ok=True)
-        
-        try:
-            with open(self.lock_file, 'w') as lf:
-                # Acquire exclusive non-blocking lock
-                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                
-                # If we got the lock, read and immediately clear
-                queued_files = self._load_queue_snapshot()
-                if queued_files:
-                    self._clear_queue()
-                
-                fcntl.flock(lf, fcntl.LOCK_UN)
-                return queued_files
-                
-        except (IOError, BlockingIOError):
-            # Another process has the lock
-            print("ℹ️  Another commit is being processed. This commit's changes will be handled next.")
-            return []
-    
     def _load_queue_snapshot(self) -> List[Dict[str, str]]:
         """
         Load and snapshot the current queue.
@@ -131,7 +105,24 @@ class GitHookHandler:
     
     def _is_worker_running(self) -> bool:
         """Check if the background worker is running."""
-        return is_worker_running(self.project_root)
+        if not os.path.exists(self.pid_file):
+            return False
+        
+        try:
+            with open(self.pid_file, 'r') as f:
+                pid = int(f.read().strip())
+            
+            # Use basic os.kill with signal 0 to check if process exists
+            # This works cross-platform without requiring psutil in hooks
+            try:
+                os.kill(pid, 0)
+                return True
+            except OSError:
+                # Process doesn't exist
+                return False
+                
+        except (ValueError, IOError):
+            return False
     
     def _process_synchronously(self, files: List[Dict[str, str]], config: Dict) -> int:
         """
@@ -144,8 +135,9 @@ class GitHookHandler:
         Returns:
             int: Exit code
         """
+        import subprocess
         
-        dataset_name = config.get('dataset_name', 'default')
+        dataset_name = config.get('datasetName', 'default')
         model = config.get('model', 'claude-3-5-sonnet-20240620')
         
         completed = []
@@ -153,53 +145,96 @@ class GitHookHandler:
         
         for file_info in files:
             filepath = file_info['filepath']
+            commit_hash = file_info.get('commit_hash', 'HEAD')
             
-            # Validate file path to prevent traversal attacks
-            # Use os.path.realpath to resolve all symbolic links and get the canonical path.
-            # This ensures we are checking the actual physical location of the file.
-            abs_project_root = os.path.realpath(self.project_root)
-            abs_filepath = os.path.realpath(os.path.join(abs_project_root, filepath))
+            # Security check: Ensure file is within project root
+            abs_filepath = os.path.join(self.project_root, filepath)
+            real_filepath = os.path.realpath(abs_filepath)
             
-            # Ensure the resolved file path starts with the resolved project root path.
-            # The os.sep is crucial to prevent cases like /project_root_abc matching /project_root_abcd.
-            if not abs_filepath.startswith(abs_project_root + os.sep):
-                print(f"  Processing {filepath}... ✗ (Security: Attempted to access file outside project root)")
-                failed.append(file_info)
+            if not real_filepath.startswith(os.path.join(self.project_root, '')):
+                print(f"  ⚠️  Skipping {filepath} (outside project)")
                 continue
             
-            commit_hash = file_info.get('commit_hash', 'HEAD')
+            if not os.path.isfile(real_filepath):
+                print(f"  ⚠️  Skipping {filepath} (not a file)")
+                continue
             
             print(f"  Processing {filepath}...", end='', flush=True)
             
             try:
-                # Call code-query MCP to update documentation
+                # Read file content to avoid TOCTOU
+                with open(real_filepath, 'r', encoding='utf-8') as f:
+                    file_content = f.read()
+                
+                # Use Claude directly with content
+                prompt = f"""Analyze and document this code file: {filepath}
+
+Focus on:
+- Purpose and functionality
+- Main functions/methods
+- Imports and exports
+- Key implementation details
+
+Return a JSON object with these fields:
+- overview: Brief description
+- functions: Object mapping function names to descriptions
+- imports: Object of imports
+- exports: Object of exports
+- types_interfaces_classes: Object of type definitions
+- constants: Object of constants
+- dependencies: Array of external dependencies
+- other_notes: Array of additional notes
+
+File content:
+{file_content}"""
+                
                 result = subprocess.run([
-                    sys.executable, 'server.py',
-                    'document-file',
-                    '--dataset', dataset_name,
-                    '--file', filepath,
-                    '--commit', commit_hash,
+                    'claude', '-p',
+                    prompt,
                     '--model', model
                 ], capture_output=True, text=True, cwd=self.project_root)
                 
                 if result.returncode == 0:
                     print(" ✓")
-                    completed.append(file_info)
+                    # Parse and save documentation
+                    try:
+                        # Parse JSON from Claude's response
+                        import re
+                        json_match = re.search(r'\{.*\}', result.stdout, re.DOTALL)
+                        if json_match:
+                            doc_data = json.loads(json_match.group())
+                            
+                            # Update database
+                            from storage.sqlite_storage import CodeQueryServer
+                            storage = CodeQueryServer(os.path.join(self.project_root, '.code-query', 'code_data.db'))
+                            storage.update_file_documentation(
+                                dataset_name=dataset_name,
+                                filepath=filepath,
+                                commit_hash=commit_hash,
+                                **doc_data
+                            )
+                            completed.append(file_info)
+                        else:
+                            print(f" ✗ (invalid response format)")
+                            failed.append(file_info)
+                    except Exception as e:
+                        print(f" ✗ (parse error: {e})")
+                        failed.append(file_info)
                 else:
-                    print(f" ✗ ({result.stderr.strip()})")
+                    print(f" ✗ (claude error)")
                     failed.append(file_info)
                     
             except Exception as e:
                 print(f" ✗ ({e})")
                 failed.append(file_info)
         
-        # Queue already cleared atomically, no need to update
+        # Update queue to remove completed files
+        self._update_queue(completed)
         
         # Summary
         print(f"\n✓ Documentation updated ({len(completed)} files processed)")
         if failed:
             print(f"⚠️  {len(failed)} file(s) failed to process")
-            # Could re-queue failed files here if desired
         
         return 0
     
@@ -219,7 +254,7 @@ class GitHookHandler:
             sys.path.insert(0, self.project_root)
             from tasks import process_file_documentation, huey
             
-            dataset_name = config.get('dataset_name', 'default')
+            dataset_name = config.get('datasetName', 'default')
             
             # Enqueue each file
             task_ids = []
@@ -230,12 +265,13 @@ class GitHookHandler:
                     commit_hash=file_info.get('commit_hash', 'HEAD'),
                     project_root=self.project_root
                 )
-                task_ids.append(task.id)
+                task_ids.append(str(task.id))
             
-            # Queue already cleared atomically
+            # Clear the queue since we've enqueued everything
+            self._clear_queue()
             
             print(f"✓ {len(files)} file(s) queued for background processing")
-            print(f"  Monitor progress: tail -f {os.path.join(self.project_root, '.code-query', 'worker.log')}")
+            print(f"  Monitor progress: tail -f {os.path.join(self.project_root, '.code-query', 'logs', 'worker.log')}")
             
             return 0
             
@@ -279,6 +315,7 @@ class GitHookHandler:
 def handle_post_commit() -> int:
     """Entry point for post-commit hook."""
     # Get git repository root
+    import subprocess
     result = subprocess.run(
         ['git', 'rev-parse', '--show-toplevel'],
         capture_output=True,
@@ -291,6 +328,64 @@ def handle_post_commit() -> int:
     project_root = result.stdout.strip()
     handler = GitHookHandler(project_root)
     return handler.handle_post_commit()
+
+
+def install_git_hooks(project_root: str) -> bool:
+    """
+    Install or update git hooks for the project.
+    
+    Args:
+        project_root: Path to project root
+        
+    Returns:
+        bool: True if installation successful
+    """
+    # Validate project root
+    real_project_root = os.path.realpath(project_root)
+    git_hooks_dir = os.path.join(real_project_root, '.git', 'hooks')
+    
+    if not os.path.exists(git_hooks_dir):
+        print("✗ Not a git repository")
+        return False
+    
+    # Post-commit hook content
+    hook_content = '''#!/usr/bin/env python3
+import sys
+import os
+
+# Add project root to Python path
+git_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(git_dir)
+sys.path.insert(0, project_root)
+
+# Import and run handler
+from helpers.git_hook_handler import handle_post_commit
+sys.exit(handle_post_commit())
+'''
+    
+    hook_path = os.path.join(git_hooks_dir, 'post-commit')
+    
+    try:
+        # Back up existing hook if present
+        if os.path.exists(hook_path):
+            backup_path = hook_path + '.backup'
+            import shutil
+            shutil.copy2(hook_path, backup_path)
+            print(f"  Backed up existing hook to {backup_path}")
+        
+        # Write hook file
+        with open(hook_path, 'w') as f:
+            f.write(hook_content)
+        
+        # Make executable
+        os.chmod(hook_path, 0o755)
+        
+        print(f"✓ Installed post-commit hook")
+        return True
+        
+    except Exception as e:
+        print(f"✗ Failed to install hook: {e}")
+        return False
 
 
 if __name__ == '__main__':

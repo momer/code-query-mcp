@@ -4,21 +4,23 @@ import subprocess
 import signal
 import time
 import json
-from collections import deque
 from typing import Optional, Tuple
 import psutil
-
 
 class WorkerManager:
     """Manages the Huey worker process lifecycle."""
     
     def __init__(self, project_root: str):
-        self.project_root = project_root
-        # Determine the application's root directory (parent of cli/ directory)
-        self.app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.pid_file = os.path.join(project_root, '.code-query', 'worker.pid')
-        self.log_file = os.path.join(project_root, '.code-query', 'worker.log')
-        self.config_file = os.path.join(project_root, '.code-query', 'config.json')
+        # Validate and normalize project root
+        self.project_root = os.path.realpath(project_root)
+        if not os.path.isdir(self.project_root):
+            raise ValueError(f"Project root does not exist: {project_root}")
+        
+        # Define paths with security in mind
+        self.code_query_dir = os.path.join(self.project_root, '.code-query')
+        self.pid_file = os.path.join(self.code_query_dir, 'worker.pid')
+        self.log_file = os.path.join(self.code_query_dir, 'logs', 'worker.log')
+        self.config_file = os.path.join(self.code_query_dir, 'config.json')
     
     def start_worker(self) -> bool:
         """
@@ -33,60 +35,67 @@ class WorkerManager:
             print(f"✓ Worker already running (PID: {existing_pid})")
             return True
         
-        # Ensure directories exist
+        # Ensure directories exist with proper permissions
         os.makedirs(os.path.dirname(self.pid_file), exist_ok=True)
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
         
-        # Prepare log file for output redirection
-        log_file_handle = open(self.log_file, 'a')
+        # Set up logging for the worker
+        from tasks import setup_logging
+        setup_logging(self.log_file)
         
         # Build the huey_consumer command
         # Important: We need to ensure tasks.py is importable
         env = os.environ.copy()
-        python_path = env.get('PYTHONPATH', '')
-        # CRITICAL FIX: Use the application's root, not the user's project root
-        # This prevents remote code execution via malicious tasks.py in user projects
-        new_path_parts = [self.app_root]
-        if python_path:
-            new_path_parts.append(python_path)
-        env['PYTHONPATH'] = os.pathsep.join(new_path_parts)
+        env['PYTHONPATH'] = self.project_root + ':' + env.get('PYTHONPATH', '')
+        env['HUEY_WORKER_START_TIME'] = str(time.time())  # For health checks
         
         cmd = [
-            'huey_consumer.py',  # Huey's consumer command
+            'huey_consumer',  # Huey's consumer command
             'tasks.huey',  # Import path to our huey instance
-            '-w', '1'  # Single worker for simplicity
-            # Note: logging is now handled by basicConfig in tasks.py
+            '--workers', '1',  # Single worker for simplicity
+            '--logfile', self.log_file,
+            '--verbose'
         ]
         
         try:
-            # Launch huey_consumer as subprocess
-            # preexec_fn=os.setsid for Unix daemonization
-            p = subprocess.Popen(
-                cmd,
-                stdout=log_file_handle,
-                stderr=subprocess.STDOUT,  # Merge stderr into stdout
-                preexec_fn=os.setsid if hasattr(os, 'setsid') else None,
-                cwd=self.project_root,  # Safe to use as working directory (data only)
-                env=env
-            )
-            
-            # Capture the actual worker PID
-            worker_pid = p.pid
-            
-            # Write PID atomically
-            temp_pid_file = self.pid_file + '.tmp'
-            with open(temp_pid_file, 'w') as f:
-                f.write(str(worker_pid))
-            os.replace(temp_pid_file, self.pid_file)
-            
-            # Give the worker a moment to start
-            time.sleep(1)
-            
-            # Verify it's still running
-            if psutil.pid_exists(worker_pid):
-                print(f"✓ Worker started successfully (PID: {worker_pid})")
-                print(f"  Log file: {self.log_file}")
-                return True
-            else:
+            # Open log file for output redirection
+            with open(self.log_file, 'a') as log_file_handle:
+                # Launch huey_consumer as subprocess
+                # preexec_fn=os.setsid for Unix daemonization
+                p = subprocess.Popen(
+                    cmd,
+                    stdout=log_file_handle,
+                    stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                    preexec_fn=os.setsid if hasattr(os, 'setsid') else None,
+                    cwd=self.project_root,
+                    env=env
+                )
+                
+                # Capture the actual worker PID
+                worker_pid = p.pid
+                
+                # Write PID atomically to prevent race conditions
+                temp_pid_file = self.pid_file + '.tmp'
+                with open(temp_pid_file, 'w') as f:
+                    f.write(str(worker_pid))
+                os.replace(temp_pid_file, self.pid_file)
+                
+                # Give the worker a moment to start
+                time.sleep(2)
+                
+                # Verify it's still running
+                if psutil.pid_exists(worker_pid):
+                    # Double-check it's our process
+                    try:
+                        proc = psutil.Process(worker_pid)
+                        cmdline = ' '.join(proc.cmdline())
+                        if 'huey' in cmdline:
+                            print(f"✓ Worker started successfully (PID: {worker_pid})")
+                            print(f"  Log file: {self.log_file}")
+                            return True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                
                 print("✗ Worker process died immediately after starting")
                 print(f"  Check log file: {self.log_file}")
                 self._cleanup_pid_file()
@@ -95,8 +104,6 @@ class WorkerManager:
         except Exception as e:
             print(f"✗ Failed to start worker: {e}")
             return False
-        finally:
-            log_file_handle.close()
     
     def stop_worker(self) -> bool:
         """
@@ -146,15 +153,6 @@ class WorkerManager:
             print(f"✗ Error stopping worker: {e}")
             return False
     
-    def get_worker_status(self) -> Tuple[bool, Optional[int]]:
-        """
-        Get the current worker status.
-        
-        Returns:
-            Tuple[bool, Optional[int]]: (is_running, pid)
-        """
-        return self._check_worker_status()
-    
     def restart_worker(self) -> bool:
         """
         Restart the worker process.
@@ -172,6 +170,15 @@ class WorkerManager:
         
         # Start worker
         return self.start_worker()
+    
+    def get_worker_status(self) -> Tuple[bool, Optional[int]]:
+        """
+        Get the current worker status.
+        
+        Returns:
+            Tuple[bool, Optional[int]]: (is_running, pid)
+        """
+        return self._check_worker_status()
     
     def display_worker_status(self):
         """Display detailed worker status information."""
@@ -197,29 +204,29 @@ class WorkerManager:
         
         # Check configuration
         if os.path.exists(self.config_file):
-            with open(self.config_file, 'r') as f:
-                config = json.load(f)
-                mode = config.get('processing', {}).get('mode', 'manual')
-                print(f"Mode: {mode}")
+            try:
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                    mode = config.get('processing', {}).get('mode', 'manual')
+                    print(f"Mode: {mode}")
+            except (json.JSONDecodeError, IOError):
+                print("Mode: <error reading config>")
         
         # Check log file
         if os.path.exists(self.log_file):
-            size = os.path.getsize(self.log_file) / 1024  # KB
-            print(f"Log file: {self.log_file} ({size:.1f} KB)")
-            
-            # Show last few lines of log
-            print("\nRecent log entries:")
-            print("-" * 40)
             try:
+                size = os.path.getsize(self.log_file) / 1024  # KB
+                print(f"Log file: {self.log_file} ({size:.1f} KB)")
+                
+                # Show last few lines of log
+                print("\nRecent log entries:")
+                print("-" * 40)
                 with open(self.log_file, 'r') as f:
-                    # Efficiently get the last 5 lines
-                    last_lines = deque(f, 5)
-                    for line in last_lines:
+                    lines = f.readlines()
+                    for line in lines[-5:]:  # Last 5 lines
                         print(f"  {line.rstrip()}")
-            except FileNotFoundError:
-                print("  Log file not found.")
-            except Exception as e:
-                print(f"  Error reading log file: {e}")
+            except IOError:
+                print(f"Log file: <error reading {self.log_file}>")
     
     def _check_worker_status(self) -> Tuple[bool, Optional[int]]:
         """
