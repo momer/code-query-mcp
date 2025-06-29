@@ -9,9 +9,14 @@ import fnmatch
 import subprocess
 import re
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 from helpers.git_helper import get_actual_git_dir, get_current_commit, get_changed_files_since_commit
 from storage.migrations import SchemaMigrator
+from storage.sqlite_backend import SqliteBackend
+from storage.models import FileDocumentation, SearchResult, DatasetMetadata
+
+if TYPE_CHECKING:
+    from storage.backend import StorageBackend
 
 
 # Global database connection
@@ -47,17 +52,62 @@ def get_db_connection(db_path: str):
 
 
 class CodeQueryServer:
-    def __init__(self, db_path: str, db_dir: str):
-        self.db = None
+    def __init__(self, storage_backend: Optional['StorageBackend'] = None, db_path: Optional[str] = None, db_dir: Optional[str] = None):
+        """
+        Initialize CodeQueryServer with a storage backend.
+        
+        Args:
+            storage_backend: Storage backend implementation (for dependency injection)
+            db_path: Database path (for backward compatibility when storage_backend is None)
+            db_dir: Database directory (for backward compatibility when storage_backend is None)
+        """
+        self.storage_backend = storage_backend
+        self.db = None  # Keep for backward compatibility
         self.cwd = os.getcwd()
-        self.db_path = db_path
-        self.db_dir = db_dir
-        # Ensure database directory exists
-        os.makedirs(db_dir, exist_ok=True)
+        
+        # Only set these if we're in backward compatibility mode
+        if storage_backend is None:
+            if db_path is None or db_dir is None:
+                raise ValueError("db_path and db_dir must be provided when storage_backend is None")
+            self.db_path = db_path
+            self.db_dir = db_dir
+            # Ensure database directory exists
+            os.makedirs(db_dir, exist_ok=True)
+        else:
+            # When using injected backend, these might not be needed
+            self.db_path = db_path
+            self.db_dir = db_dir
+    
+    @classmethod
+    def from_db_path(cls, db_path: str, db_dir: str) -> 'CodeQueryServer':
+        """
+        Factory method for backward compatibility.
+        Creates a CodeQueryServer with a SqliteBackend automatically.
+        
+        Args:
+            db_path: Path to the SQLite database file
+            db_dir: Directory containing the database
+            
+        Returns:
+            CodeQueryServer instance with SqliteBackend
+        """
+        instance = cls(storage_backend=None, db_path=db_path, db_dir=db_dir)
+        return instance
         
     def setup_database(self):
         """Connect to persistent SQLite database."""
+        # If backend was injected, we don't need to set up database
+        if self.storage_backend is not None:
+            # Still need to set self.db for backward compatibility
+            if hasattr(self, 'db_path') and self.db_path:
+                self.db = get_db_connection(self.db_path)
+            return
+            
+        # Legacy mode: create our own backend
         self.db = get_db_connection(self.db_path)
+        
+        # Initialize the new storage backend
+        self.storage_backend = SqliteBackend(self.db_path)
         
         # Enable FTS5 if available
         self.db.execute("PRAGMA compile_options")
@@ -451,216 +501,121 @@ class CodeQueryServer:
             return f'({phrase} OR ({individual_terms}))'
     
     def search_files(self, query: str, dataset_name: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search files in dataset using FTS5 or fallback to LIKE."""
-        if not self.db:
+        """Search files in dataset using the storage backend."""
+        if not self.storage_backend:
             return []
         
         # Validate dataset name
         if not self._is_valid_dataset_name(dataset_name):
             return []  # Return empty list for invalid dataset names
         
-        results = []
-        
-        # Check if FTS5 is available
-        cursor = self.db.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND name='files_fts'
-        """)
-        
-        if cursor.fetchone():
-            # Use FTS5 for search with improved query building
-            fts_query = self._build_fts5_query(query)
+        try:
+            # Use the storage backend for search
+            search_results = self.storage_backend.search_metadata(query, dataset_name, limit)
             
-            try:
-                cursor = self.db.execute("""
-                    SELECT DISTINCT f.filepath, f.filename, f.overview, f.ddd_context,
-                           snippet(files_fts, -1, '[MATCH]', '[/MATCH]', '...', 64) as match_snippet
-                    FROM files f
-                    JOIN files_fts ON f.rowid = files_fts.rowid
-                    WHERE files_fts MATCH ?
-                    AND f.dataset_id = ?
-                    ORDER BY bm25(files_fts)
-                    LIMIT ?
-                """, (fts_query, dataset_name, limit))
-            except Exception as e:
-                # If complex query fails, fall back to simple search
-                logging.warning(f"FTS5 query failed, using simple search: {e}")
-                simple_query = ' '.join(query.split())  # Basic word tokenization
-                cursor = self.db.execute("""
-                    SELECT DISTINCT f.filepath, f.filename, f.overview, f.ddd_context,
-                           snippet(files_fts, -1, '[MATCH]', '[/MATCH]', '...', 64) as match_snippet
-                    FROM files f
-                    JOIN files_fts ON f.rowid = files_fts.rowid
-                    WHERE files_fts MATCH ?
-                    AND f.dataset_id = ?
-                    ORDER BY bm25(files_fts)
-                    LIMIT ?
-                """, (simple_query, dataset_name, limit))
-        else:
-            # Fallback to LIKE search
-            like_query = f"%{query}%"
-            cursor = self.db.execute("""
-                SELECT filepath, filename, overview, ddd_context, 
-                       overview as match_snippet
-                FROM files
-                WHERE dataset_id = ?
-                AND (
-                    filepath LIKE ? OR
-                    filename LIKE ? OR
-                    overview LIKE ? OR
-                    ddd_context LIKE ? OR
-                    functions LIKE ? OR
-                    exports LIKE ? OR
-                    imports LIKE ? OR
-                    types_interfaces_classes LIKE ? OR
-                    constants LIKE ?
-                )
-                LIMIT ?
-            """, (dataset_name, like_query, like_query, like_query, like_query, 
-                  like_query, like_query, like_query, like_query, like_query, limit))
-        
-        for row in cursor:
-            results.append({
-                "filepath": row["filepath"],
-                "filename": row["filename"],
-                "overview": row["overview"],
-                "ddd_context": row["ddd_context"],
-                "match_snippet": row["match_snippet"]
-            })
-        
-        return results
+            # Convert SearchResult objects to dict format for backward compatibility
+            results = []
+            for result in search_results:
+                results.append({
+                    "filepath": result.filepath,
+                    "filename": result.filename,
+                    "overview": result.overview,
+                    "ddd_context": result.ddd_context,
+                    "match_snippet": result.snippet
+                })
+            
+            return results
+        except Exception as e:
+            logging.error(f"Search failed: {e}")
+            return []
     
     def search_full_content(self, query: str, dataset_name: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search full file contents using FTS5 for comprehensive code search."""
-        if not self.db:
+        """Search full file contents using the storage backend."""
+        if not self.storage_backend:
             return []
         
         # Validate dataset name
         if not self._is_valid_dataset_name(dataset_name):
             return []
         
-        results = []
-        
-        # Check if FTS5 is available
-        cursor = self.db.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND name='files_fts'
-        """)
-        
-        if cursor.fetchone():
-            # Use FTS5 for search with focus on full_content
-            base_fts_query = self._build_fts5_query(query)
-            # Scope the query to the full_content column
-            fts_query = f"full_content:({base_fts_query})"
+        try:
+            # Use the storage backend for content search
+            search_results = self.storage_backend.search_content(query, dataset_name, limit)
             
-            cursor = self.db.execute("""
-                SELECT f.filepath, f.filename, f.overview, f.ddd_context,
-                       snippet(files_fts, 12, '[MATCH]', '[/MATCH]', '...', 128) as content_snippet,
-                       rank
-                FROM files f
-                JOIN files_fts ON f.rowid = files_fts.rowid
-                WHERE files_fts MATCH ?
-                AND f.dataset_id = ?
-                ORDER BY rank
-                LIMIT ?
-            """, (fts_query, dataset_name, limit))
-            
-            for row in cursor:
+            # Convert SearchResult objects to dict format for backward compatibility
+            results = []
+            for result in search_results:
                 results.append({
-                    "filepath": row["filepath"],
-                    "filename": row["filename"],
-                    "overview": row["overview"],
-                    "ddd_context": row["ddd_context"],
-                    "content_snippet": row["content_snippet"],
+                    "filepath": result.filepath,
+                    "filename": result.filename,
+                    "overview": result.overview,
+                    "ddd_context": result.ddd_context,
+                    "content_snippet": result.snippet,
                     "search_type": "full_content",
-                    "rank": row["rank"]
+                    "rank": result.score
                 })
-        else:
-            # Fallback to LIKE search on full_content
-            like_query = f"%{query}%"
-            cursor = self.db.execute("""
-                SELECT filepath, filename, overview, ddd_context,
-                       SUBSTR(full_content, 
-                              CASE WHEN INSTR(LOWER(full_content), LOWER(?)) > 64 
-                                   THEN INSTR(LOWER(full_content), LOWER(?)) - 64 
-                                   ELSE 1 END, 
-                              256) as content_snippet
-                FROM files
-                WHERE dataset_id = ? AND full_content LIKE ?
-                LIMIT ?
-            """, (query, query, dataset_name, like_query, limit))
             
-            for row in cursor:
-                results.append({
-                    "filepath": row["filepath"],
-                    "filename": row["filename"],
-                    "overview": row["overview"],
-                    "ddd_context": row["ddd_context"],
-                    "content_snippet": row["content_snippet"],
-                    "search_type": "full_content_fallback",
-                    "warning": "FTS5 is not available; used slower fallback search."
-                })
-        
-        return results
+            return results
+        except Exception as e:
+            logging.error(f"Content search failed: {e}")
+            return []
     
     def search(self, query: str, dataset_name: str, limit: int = 10) -> Dict[str, Any]:
         """
         Unified search that combines metadata search and full-content search results.
         Returns both types of results for comprehensive code discovery.
         """
-        if not self.db:
+        if not self.storage_backend:
             return {"metadata_results": [], "content_results": [], "total_results": 0}
         
         # Validate dataset name
         if not self._is_valid_dataset_name(dataset_name):
             return {"error": "Invalid dataset name", "metadata_results": [], "content_results": [], "total_results": 0}
         
-        # Get metadata search results
-        metadata_results = self.search_files(query, dataset_name, limit)
-        
-        # Get full-content search results
-        content_results = self.search_full_content(query, dataset_name, limit)
-        
-        # Combine and deduplicate results by filepath
-        seen_files = set()
-        combined_metadata = []
-        combined_content = []
-        
-        # Process metadata results
-        for result in metadata_results:
-            filepath = result["filepath"]
-            if filepath not in seen_files:
-                seen_files.add(filepath)
-                combined_metadata.append(result)
-        
-        # Process content results, avoiding duplicates
-        for result in content_results:
-            filepath = result["filepath"]
-            if filepath not in seen_files:
-                seen_files.add(filepath)
-                combined_content.append(result)
-            else:
-                # File already found in metadata search, add content snippet to existing result
-                for meta_result in combined_metadata:
-                    if meta_result["filepath"] == filepath:
-                        meta_result["content_snippet"] = result.get("content_snippet", "")
-                        meta_result["search_type"] = "both"
-                        break
-        
-        total_results = len(combined_metadata) + len(combined_content)
-        
-        return {
-            "query": query,
-            "dataset_name": dataset_name,
-            "metadata_results": combined_metadata,
-            "content_results": combined_content,
-            "total_results": total_results,
-            "search_summary": {
-                "metadata_matches": len(combined_metadata),
-                "content_only_matches": len(combined_content),
-                "total_unique_files": total_results
+        try:
+            # Use the storage backend's unified search
+            metadata_results, content_only_results, stats = self.storage_backend.search_unified(
+                query, dataset_name, limit
+            )
+            
+            # Convert to legacy format for backward compatibility
+            combined_metadata = []
+            for result in metadata_results:
+                combined_metadata.append({
+                    "filepath": result.filepath,
+                    "filename": result.filename,
+                    "overview": result.overview,
+                    "ddd_context": result.ddd_context,
+                    "match_snippet": result.snippet
+                })
+            
+            combined_content = []
+            for result in content_only_results:
+                combined_content.append({
+                    "filepath": result.filepath,
+                    "filename": result.filename,
+                    "overview": result.overview,
+                    "ddd_context": result.ddd_context,
+                    "content_snippet": result.snippet,
+                    "search_type": "full_content",
+                    "rank": result.score
+                })
+            
+            return {
+                "query": query,
+                "dataset_name": dataset_name,
+                "metadata_results": combined_metadata,
+                "content_results": combined_content,
+                "total_results": stats["unique_files"],
+                "search_summary": {
+                    "metadata_matches": stats["total_metadata_matches"],
+                    "content_only_matches": len(content_only_results),
+                    "total_unique_files": stats["unique_files"]
+                }
             }
-        }
+        except Exception as e:
+            logging.error(f"Unified search failed: {e}")
+            return {"metadata_results": [], "content_results": [], "total_results": 0}
     
     def populate_spellfix_vocabulary(self, dataset_name: str):
         """Populate spellfix vocabulary from dataset for better search suggestions."""
@@ -754,142 +709,132 @@ class CodeQueryServer:
         Supports partial matching - if filepath doesn't contain %, it will be wrapped with % for LIKE query.
         Returns single file dict if exact match, list of files if multiple matches.
         """
-        if not self.db:
+        if not self.storage_backend:
             return None
         
         # Validate dataset name
         if not self._is_valid_dataset_name(dataset_name):
             return None
         
-        # If filepath doesn't contain wildcards, wrap with % for flexible matching
-        if '%' not in filepath:
-            # Try exact match first - exclude full_content to return only metadata
-            cursor = self.db.execute("""
-                SELECT filepath, filename, overview, ddd_context, functions, exports, imports, 
-                       types_interfaces_classes, constants, dependencies, other_notes, 
-                       documented_at_commit, documented_at
-                FROM files 
-                WHERE dataset_id = ? AND filepath = ?
-            """, (dataset_name, filepath))
+        try:
+            # Use storage backend to get file documentation
+            doc = self.storage_backend.get_file_documentation(filepath, dataset_name)
             
-            row = cursor.fetchone()
-            if row:
-                # Exact match found, return single result
-                result = dict(row)
-                for field in ['functions', 'exports', 'imports', 'types_interfaces_classes', 'constants', 'dependencies', 'other_notes']:
-                    if result.get(field):
-                        try:
-                            result[field] = json.loads(result[field])
-                        except (json.JSONDecodeError, TypeError):
-                            logging.warning(f"Could not parse JSON for field '{field}' in file '{filepath}'. Using default value.")
-                            result[field] = {} if field not in ['dependencies', 'other_notes'] else []
-                result.pop('dataset_id', None)
+            if doc:
+                # Convert FileDocumentation to dict for backward compatibility
+                result = {
+                    "filepath": doc.filepath,
+                    "filename": doc.filename,
+                    "overview": doc.overview,
+                    "ddd_context": doc.ddd_context,
+                    "functions": doc.functions or {},
+                    "exports": doc.exports or {},
+                    "imports": doc.imports or {},
+                    "types_interfaces_classes": doc.types_interfaces_classes or {},
+                    "constants": doc.constants or {},
+                    "dependencies": doc.dependencies or [],
+                    "other_notes": doc.other_notes or [],
+                    "documented_at_commit": doc.documented_at_commit,
+                    "documented_at": doc.documented_at
+                }
                 return result
             
-            # No exact match, try partial matching
-            # Prevent overly broad searches that could cause performance issues
-            if len(filepath) < 3:
-                return None  # Query too broad for partial matching
-            filepath = f'%{filepath}%'
-        
-        # Use LIKE query for partial matching - exclude full_content to return only metadata
-        cursor = self.db.execute("""
-            SELECT filepath, filename, overview, ddd_context, functions, exports, imports, 
-                   types_interfaces_classes, constants, dependencies, other_notes, 
-                   documented_at_commit, documented_at
-            FROM files 
-            WHERE dataset_id = ? AND filepath LIKE ?
-            LIMIT ?
-        """, (dataset_name, filepath, limit))
-        
-        rows = cursor.fetchall()
-        if not rows:
+            # If no exact match and filepath contains wildcards, do a search
+            if '%' in filepath:
+                # Use search to find partial matches
+                search_results = self.storage_backend.search_metadata(filepath.replace('%', ''), dataset_name, limit)
+                if search_results:
+                    # Get full details for each result
+                    results = []
+                    for sr in search_results:
+                        doc = self.storage_backend.get_file_documentation(sr.filepath, dataset_name)
+                        if doc:
+                            results.append({
+                                "filepath": doc.filepath,
+                                "filename": doc.filename,
+                                "overview": doc.overview,
+                                "ddd_context": doc.ddd_context,
+                                "functions": doc.functions or {},
+                                "exports": doc.exports or {},
+                                "imports": doc.imports or {},
+                                "types_interfaces_classes": doc.types_interfaces_classes or {},
+                                "constants": doc.constants or {},
+                                "dependencies": doc.dependencies or [],
+                                "other_notes": doc.other_notes or [],
+                                "documented_at_commit": doc.documented_at_commit,
+                                "documented_at": doc.documented_at
+                            })
+                    
+                    # If only one result, return it directly for backward compatibility
+                    if len(results) == 1:
+                        return results[0]
+                    return results if results else None
+            
             return None
-        
-        # Convert rows to list of dicts and parse JSON fields
-        results = []
-        for row in rows:
-            result = dict(row)
-            for field in ['functions', 'exports', 'imports', 'types_interfaces_classes', 'constants', 'dependencies', 'other_notes']:
-                if result.get(field):
-                    try:
-                        result[field] = json.loads(result[field])
-                    except (json.JSONDecodeError, TypeError):
-                        logging.warning(f"Could not parse JSON for field '{field}' in file '{result['filepath']}'. Using default value.")
-                        result[field] = {} if field not in ['dependencies', 'other_notes'] else []
-            result.pop('dataset_id', None)
-            results.append(result)
-        
-        # If only one result, return it directly for backward compatibility
-        if len(results) == 1:
-            return results[0]
-        return results
+            
+        except Exception as e:
+            logging.error(f"Failed to get file: {e}")
+            return None
     
     def list_domains(self, dataset_name: str) -> List[str]:
         """List unique DDD context domains in dataset."""
-        if not self.db:
+        if not self.storage_backend:
             return []
         
         # Validate dataset name
         if not self._is_valid_dataset_name(dataset_name):
             return []
         
-        cursor = self.db.execute("""
-            SELECT DISTINCT ddd_context 
-            FROM files 
-            WHERE dataset_id = ?
-            AND ddd_context IS NOT NULL 
-            AND ddd_context != ''
-            ORDER BY ddd_context
-        """, (dataset_name,))
-        
-        return [row['ddd_context'] for row in cursor]
+        try:
+            # Get all files in the dataset
+            filepaths = self.storage_backend.get_dataset_files(dataset_name)
+            
+            # Collect unique DDD contexts
+            domains = set()
+            for filepath in filepaths:
+                doc = self.storage_backend.get_file_documentation(filepath, dataset_name)
+                if doc and doc.ddd_context:
+                    domains.add(doc.ddd_context)
+            
+            return sorted(list(domains))
+        except Exception as e:
+            logging.error(f"Failed to list domains: {e}")
+            return []
     
     def list_datasets(self) -> List[Dict[str, Any]]:
         """List all loaded datasets with metadata."""
-        if not self.db:
+        if not self.storage_backend:
             return []
         
-        cursor = self.db.execute("""
-            SELECT d.dataset_id as name, d.source_dir, d.files_count, d.loaded_at,
-                   COUNT(f.filepath) as current_files
-            FROM dataset_metadata d
-            LEFT JOIN files f ON d.dataset_id = f.dataset_id
-            GROUP BY d.dataset_id, d.source_dir, d.files_count, d.loaded_at
-            ORDER BY d.loaded_at DESC
-        """)
-        
-        datasets = []
-        for row in cursor:
-            datasets.append({
-                "name": row['name'],
-                "source_dir": row['source_dir'],
-                "files_count": row['current_files'],  # Use actual count
-                "loaded_at": row['loaded_at']
-            })
-        
-        return datasets
+        try:
+            # Use storage backend to list datasets
+            dataset_metadatas = self.storage_backend.list_datasets()
+            
+            datasets = []
+            for meta in dataset_metadatas:
+                # Get actual file count
+                file_count = self.storage_backend.get_dataset_file_count(meta.dataset_id)
+                
+                datasets.append({
+                    "name": meta.dataset_id,
+                    "source_dir": meta.source_dir,
+                    "files_count": file_count,
+                    "loaded_at": meta.loaded_at
+                })
+            
+            return datasets
+        except Exception as e:
+            logging.error(f"Failed to list datasets: {e}")
+            return []
     
     def get_status(self) -> Dict[str, Any]:
         """Get database status information."""
-        if not self.db:
+        if not self.storage_backend:
             return {"connected": False}
         
         try:
-            # Get table information
-            cursor = self.db.execute("""
-                SELECT COUNT(DISTINCT dataset_id) as dataset_count,
-                       COUNT(*) as total_files
-                FROM files
-            """)
-            row = cursor.fetchone()
-            
-            # Check for FTS5
-            fts_cursor = self.db.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='files_fts'
-            """)
-            has_fts = fts_cursor.fetchone() is not None
+            # Get storage info from backend
+            storage_info = self.storage_backend.get_storage_info()
             
             # Get datasets list
             datasets = self.list_datasets()
@@ -917,13 +862,17 @@ class CodeQueryServer:
                     except Exception:
                         pass
             
+            # Check for FTS5 (backward compatibility)
+            has_fts = True  # SqliteBackend always uses FTS5
+            
             status_data = {
                 "connected": True,
-                "database_path": self.db_path,
-                "dataset_count": row['dataset_count'],
-                "total_files": row['total_files'],
+                "database_path": storage_info['db_path'],
+                "dataset_count": storage_info['total_datasets'],
+                "total_files": storage_info['total_files'],
                 "fts5_enabled": has_fts,
-                "datasets": datasets
+                "datasets": datasets,
+                "storage_info": storage_info
             }
             
             if current_dataset_info:
@@ -938,8 +887,8 @@ class CodeQueryServer:
     
     def clear_dataset(self, dataset_name: str) -> Dict[str, Any]:
         """Clear all data for a specific dataset."""
-        if not self.db:
-            return {"success": False, "message": "Database not connected"}
+        if not self.storage_backend:
+            return {"success": False, "message": "Storage backend not initialized"}
         
         # Validate dataset name
         if not self._is_valid_dataset_name(dataset_name):
@@ -950,27 +899,25 @@ class CodeQueryServer:
         
         try:
             # Check if dataset exists
-            cursor = self.db.execute("""
-                SELECT COUNT(*) as count FROM files WHERE dataset_id = ?
-            """, (dataset_name,))
-            count = cursor.fetchone()['count']
-            
-            if count == 0:
+            metadata = self.storage_backend.get_dataset_metadata(dataset_name)
+            if not metadata:
                 return {"success": False, "message": f"Dataset '{dataset_name}' not found"}
             
-            # Delete files
-            self.db.execute("DELETE FROM files WHERE dataset_id = ?", (dataset_name,))
+            # Get file count before deletion
+            file_count = self.storage_backend.get_dataset_file_count(dataset_name)
             
-            # Delete metadata
-            self.db.execute("DELETE FROM dataset_metadata WHERE dataset_id = ?", (dataset_name,))
+            # Delete the dataset
+            success = self.storage_backend.delete_dataset(dataset_name)
             
-            self.db.commit()
-            
-            return {
-                "success": True,
-                "message": f"Cleared dataset '{dataset_name}'",
-                "files_removed": count
-            }
+            if success:
+                return {
+                    "success": True,
+                    "message": f"Cleared dataset '{dataset_name}'",
+                    "files_removed": file_count
+                }
+            else:
+                return {"success": False, "message": f"Failed to delete dataset '{dataset_name}'"}
+                
         except Exception as e:
             return {"success": False, "message": f"Error clearing dataset: {str(e)}"}
     
@@ -1068,8 +1015,8 @@ Would you like me to provide the file batches for you to process?
                                  constants: Dict = None, ddd_context: str = "",
                                  dependencies: List = None, other_notes: List = None) -> Dict[str, Any]:
         """Insert file documentation into dataset."""
-        if not self.db:
-            return {"success": False, "message": "Database not connected"}
+        if not self.storage_backend:
+            return {"success": False, "message": "Storage backend not initialized"}
         
         # Validate dataset name
         if not self._is_valid_dataset_name(dataset_name):
@@ -1092,54 +1039,49 @@ Would you like me to provide the file batches for you to process?
                     logging.warning(f"Could not read source file {filepath}: {read_error}")
                     full_content = f"[Error reading file: {read_error}]"
             
-            self.db.execute("""
-                INSERT OR REPLACE INTO files (
-                    dataset_id, filepath, filename, overview, ddd_context,
-                    functions, exports, imports, types_interfaces_classes,
-                    constants, dependencies, other_notes, documented_at_commit,
-                    documented_at, full_content
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
-            """, (
-                dataset_name,
-                filepath,
-                filename,
-                overview,
-                ddd_context,
-                json.dumps(functions or {}),
-                json.dumps(exports or {}),
-                json.dumps(imports or {}),
-                json.dumps(types_interfaces_classes or {}),
-                json.dumps(constants or {}),
-                json.dumps(dependencies or []),
-                json.dumps(other_notes or []),
-                current_commit,
-                full_content
-            ))
+            # Create FileDocumentation DTO
+            doc = FileDocumentation(
+                filepath=filepath,
+                filename=filename,
+                overview=overview,
+                dataset=dataset_name,
+                ddd_context=ddd_context,
+                functions=functions,
+                exports=exports,
+                imports=imports,
+                types_interfaces_classes=types_interfaces_classes,
+                constants=constants,
+                dependencies=dependencies,
+                other_notes=other_notes,
+                documented_at_commit=current_commit,
+                documented_at=datetime.now().isoformat(),
+                full_content=full_content
+            )
             
-            # Update dataset metadata file count
-            self.db.execute("""
-                UPDATE dataset_metadata 
-                SET files_count = (
-                    SELECT COUNT(*) FROM files WHERE dataset_id = ?
+            # Ensure dataset exists
+            if not self.storage_backend.get_dataset_metadata(dataset_name):
+                # Create dataset if it doesn't exist
+                self.storage_backend.create_dataset(
+                    dataset_name, 
+                    os.path.dirname(filepath),
+                    dataset_type='main'
                 )
-                WHERE dataset_id = ?
-            """, (dataset_name, dataset_name))
             
-            # Create metadata entry if it doesn't exist
-            self.db.execute("""
-                INSERT OR IGNORE INTO dataset_metadata 
-                (dataset_id, source_dir, files_count, loaded_at, dataset_type)
-                VALUES (?, ?, 1, ?, ?)
-            """, (dataset_name, os.path.dirname(filepath), datetime.now(), 'main'))
+            # Insert documentation using storage backend
+            success = self.storage_backend.insert_documentation(doc)
             
-            self.db.commit()
-            
-            return {
-                "success": True,
-                "message": f"Documentation saved for {filename}",
-                "dataset": dataset_name,
-                "filepath": filepath
-            }
+            if success:
+                return {
+                    "success": True,
+                    "message": f"Documentation saved for {filename}",
+                    "dataset": dataset_name,
+                    "filepath": filepath
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"Failed to save documentation for {filename}"
+                }
             
         except Exception as e:
             return {
@@ -1149,8 +1091,8 @@ Would you like me to provide the file batches for you to process?
     
     def update_file_documentation(self, dataset_name: str, filepath: str, **kwargs) -> Dict[str, Any]:
         """Update existing file documentation with only provided fields."""
-        if not self.db:
-            return {"success": False, "message": "Database not connected"}
+        if not self.storage_backend:
+            return {"success": False, "message": "Storage backend not initialized"}
         
         # Validate dataset name
         if not self._is_valid_dataset_name(dataset_name):
@@ -1160,68 +1102,38 @@ Would you like me to provide the file batches for you to process?
             }
         
         # Check if file exists
-        cursor = self.db.execute("""
-            SELECT * FROM files WHERE dataset_id = ? AND filepath = ?
-        """, (dataset_name, filepath))
-        
-        existing = cursor.fetchone()
+        existing = self.storage_backend.get_file_documentation(filepath, dataset_name)
         if not existing:
             return {
                 "success": False,
                 "message": f"File '{filepath}' not found in dataset '{dataset_name}'"
             }
         
-        # Build update query dynamically
-        update_fields = []
-        update_values = []
+        # Filter out None values from kwargs
+        updates = {k: v for k, v in kwargs.items() if v is not None}
         
-        field_mapping = {
-            'filename': 'filename',
-            'overview': 'overview',
-            'ddd_context': 'ddd_context',
-            'functions': 'functions',
-            'exports': 'exports', 
-            'imports': 'imports',
-            'types_interfaces_classes': 'types_interfaces_classes',
-            'constants': 'constants',
-            'dependencies': 'dependencies',
-            'other_notes': 'other_notes'
-        }
-        
-        for key, db_field in field_mapping.items():
-            if key in kwargs and kwargs[key] is not None:
-                update_fields.append(f"{db_field} = ?")
-                # JSON serialize dict/list fields
-                if key in ['functions', 'exports', 'imports', 'types_interfaces_classes', 
-                          'constants', 'dependencies', 'other_notes']:
-                    update_values.append(json.dumps(kwargs[key]))
-                else:
-                    update_values.append(kwargs[key])
-        
-        if not update_fields:
+        if not updates:
             return {
                 "success": False,
                 "message": "No fields to update"
             }
         
-        # Add WHERE clause values
-        update_values.extend([dataset_name, filepath])
-        
         try:
-            query = f"""
-                UPDATE files 
-                SET {', '.join(update_fields)}
-                WHERE dataset_id = ? AND filepath = ?
-            """
-            self.db.execute(query, update_values)
-            self.db.commit()
+            # Use storage backend to update
+            success = self.storage_backend.update_documentation(filepath, dataset_name, updates)
             
-            return {
-                "success": True,
-                "message": f"Updated documentation for {filepath}",
-                "dataset": dataset_name,
-                "updated_fields": list(kwargs.keys())
-            }
+            if success:
+                return {
+                    "success": True,
+                    "message": f"Updated documentation for {filepath}",
+                    "dataset": dataset_name,
+                    "updated_fields": list(updates.keys())
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"Failed to update documentation for {filepath}"
+                }
             
         except Exception as e:
             return {
