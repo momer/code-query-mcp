@@ -222,8 +222,13 @@ class ConfigManager:
         result = self._deep_merge(result, config)
         
         # Validate required fields
-        if not result.get('dataset_name'):
+        dataset_name = result.get('dataset_name')
+        if not dataset_name:
             raise ValueError("Configuration missing required field: dataset_name")
+        if not isinstance(dataset_name, str):
+            raise ValueError("Configuration error: 'dataset_name' must be a string")
+        if not dataset_name.strip():
+            raise ValueError("Configuration error: 'dataset_name' cannot be empty")
         
         # Validate model - allow custom but sanitize
         model = result.get('model', '')

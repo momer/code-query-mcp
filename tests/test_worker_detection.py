@@ -2,9 +2,12 @@ import unittest
 import tempfile
 import os
 import time
+import sys
 from unittest.mock import Mock, patch, MagicMock
 
-import sys
+# Third-party imports should be at the top
+import psutil
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cli.worker_manager import WorkerManager
@@ -105,21 +108,47 @@ class TestWorkerDetection(unittest.TestCase):
         self.assertFalse(os.path.exists(pid_file))
     
     def test_access_denied(self):
-        """Test handling when process access is denied."""
+        """Test handling when process access is denied.
+        
+        When access is denied to a process, we cannot determine if it's our worker
+        or not. The current implementation deletes the PID file in this case, which
+        could be problematic in production environments where processes might have
+        restricted access. Ideally, the PID file should be preserved to avoid
+        incorrectly cleaning up a potentially valid worker process that we simply
+        cannot access due to permission restrictions.
+        """
         pid_file = os.path.join(self.project_root, '.code-query', 'worker.pid')
         
+        # Write a PID file to simulate existing worker
         with open(pid_file, 'w') as f:
             f.write('1234')
         
-        import psutil
+        # Verify the PID file exists before the test
+        self.assertTrue(os.path.exists(pid_file), "PID file should exist before test")
+        
         with patch('psutil.pid_exists', return_value=True):
             with patch('psutil.Process') as mock_process_class:
+                # Simulate AccessDenied when trying to check the process
                 mock_process_class.side_effect = psutil.AccessDenied()
                 
+                # Call the method under test
                 is_running, pid = self.worker_manager._check_worker_status()
                 
-                self.assertFalse(is_running)
-                self.assertIsNone(pid)
+                # Worker should be reported as not running since we can't verify
+                self.assertFalse(is_running, "Worker should be reported as not running when access is denied")
+                self.assertIsNone(pid, "PID should be None when we cannot access the process")
+                
+                # CRITICAL ASSERTION: Verify PID file handling
+                # The current implementation DOES delete the PID file when access is denied.
+                # This behavior could be problematic because:
+                # 1. We cannot determine if the process is actually our worker
+                # 2. The process might be running with elevated privileges
+                # 3. Deleting the PID file could lead to multiple workers being started
+                # 
+                # NOTE: The current implementation deletes the file, so we test for that behavior
+                # while acknowledging this might not be the ideal approach for robustness.
+                self.assertFalse(os.path.exists(pid_file), 
+                               "Current implementation deletes PID file on AccessDenied (see comment for concerns)")
     
     @patch('subprocess.Popen')
     @patch('tasks.setup_logging')

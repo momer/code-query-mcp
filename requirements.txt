@@ -2,3 +2,4 @@ mcp
 huey
 psutil
 filelock
+pytest

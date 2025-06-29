@@ -155,7 +155,10 @@ class GitHookHandler:
         """
         import subprocess
         
-        dataset_name = config.get('datasetName', 'default')
+        # Handle multiple config field names for robustness
+        # 'mainDatasetName' is used by create_project_config 
+        # 'datasetName' and 'dataset_name' are legacy/alternative formats
+        dataset_name = config.get('mainDatasetName') or config.get('datasetName') or config.get('dataset_name', 'default')
         model = config.get('model', 'claude-3-5-sonnet-20240620')
         
         completed = []
@@ -172,10 +175,6 @@ class GitHookHandler:
             
             if os.path.commonpath([real_filepath, real_project_root]) != real_project_root:
                 print(f"  ⚠️  Skipping {filepath} (outside project)")
-                continue
-            
-            if not os.path.isfile(real_filepath):
-                print(f"  ⚠️  Skipping {filepath} (not a file)")
                 continue
             
             print(f"  Processing {filepath}...", end='', flush=True)
@@ -285,7 +284,10 @@ Content:
             sys.path.insert(0, self.project_root)
             from tasks import process_file_documentation, huey
             
-            dataset_name = config.get('datasetName', 'default')
+            # Handle multiple config field names for robustness
+            # 'mainDatasetName' is used by create_project_config 
+            # 'datasetName' and 'dataset_name' are legacy/alternative formats
+            dataset_name = config.get('mainDatasetName') or config.get('datasetName') or config.get('dataset_name', 'default')
             
             # Enqueue each file
             task_ids = []
