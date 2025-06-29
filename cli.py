@@ -329,38 +329,56 @@ def handle_worker_restart(worker_manager):
 
 def handle_worker_logs(worker_manager, args):
     """Handle worker logs command."""
+    # Get the expected safe log directory
+    # Note: We need to access project_root from worker_manager
+    # If not available, we'll need to pass it from handle_worker_command
+    project_root = getattr(worker_manager, 'project_root', None)
+    if not project_root:
+        # Fallback: try to get from log_file path
+        log_file = worker_manager.log_file
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(log_file)))
+    
+    safe_log_dir = os.path.realpath(os.path.join(project_root, '.code-query', 'logs'))
     log_file = worker_manager.log_file
     
-    if not os.path.exists(log_file):
+    try:
+        # Resolve the real path and validate it's within the safe log directory
+        real_log_path = os.path.realpath(log_file)
+        if not real_log_path.startswith(os.path.join(safe_log_dir, '')):
+            print(f"Error: Access to log file at '{log_file}' is denied.")
+            sys.exit(1)
+        
+        if args.follow:
+            # Follow mode - implemented in Python to avoid subprocess
+            import time
+            print(f"Following log file: {real_log_path} (Ctrl+C to stop)")
+            try:
+                with open(real_log_path, 'r') as f:
+                    # Go to the end of the file
+                    f.seek(0, 2)
+                    while True:
+                        line = f.readline()
+                        if not line:
+                            time.sleep(0.1)  # Wait for new lines
+                            continue
+                        print(line.rstrip())
+            except KeyboardInterrupt:
+                print("\nStopped following log.")
+                pass
+        else:
+            # Show last N lines
+            with open(real_log_path, 'r') as f:
+                lines = f.readlines()
+                for line in lines[-args.lines:]:
+                    print(line.rstrip())
+                    
+    except FileNotFoundError:
         print(f"No log file found at {log_file}")
         sys.exit(1)
-    
-    if args.follow:
-        # Follow mode - implemented in Python to avoid subprocess
-        import time
-        print(f"Following log file: {log_file} (Ctrl+C to stop)")
-        try:
-            with open(log_file, 'r') as f:
-                # Go to the end of the file
-                f.seek(0, 2)
-                while True:
-                    line = f.readline()
-                    if not line:
-                        time.sleep(0.1)  # Wait for new lines
-                        continue
-                    print(line.rstrip())
-        except FileNotFoundError:
-            print(f"No log file found at {log_file}")
-            sys.exit(1)
-        except KeyboardInterrupt:
-            print("\nStopped following log.")
-            pass
-    else:
-        # Show last N lines
-        with open(log_file, 'r') as f:
-            lines = f.readlines()
-            for line in lines[-args.lines:]:
-                print(line.rstrip())
+    except Exception as e:
+        logging.error(f"Failed to read log file: {e}", exc_info=True)
+        print("Error: Could not read log file. See application logs for details.")
+        sys.exit(1)
 
 
 def handle_worker_setup(project_root: str, args):
@@ -567,13 +585,9 @@ def handle_queue_command(args, project_root: str):
         files_to_add = []
         
         for filepath in args.files:
-            # Check if file exists before realpath
-            if not os.path.exists(filepath):
-                print(f"⚠️  Skipping non-existent file: {filepath}")
-                continue
-            
             try:
                 # Resolve the real path of the file, following symlinks
+                # This will raise an error if the path doesn't exist, avoiding a separate check
                 real_file_path = os.path.realpath(filepath)
                 
                 # Securely check if the file is within the project root
@@ -582,8 +596,16 @@ def handle_queue_command(args, project_root: str):
                     print(f"⚠️  Skipping file outside project: {filepath}")
                     continue
                 
+                # Also ensure the path is a file, not a directory
+                if not os.path.isfile(real_file_path):
+                    print(f"⚠️  Skipping non-file path: {filepath}")
+                    continue
+                
                 rel_path = os.path.relpath(real_file_path, project_root)
                 files_to_add.append((rel_path, commit))
+            except (OSError, FileNotFoundError) as e:
+                print(f"⚠️  Skipping invalid or non-existent path: {filepath}")
+                continue
             except Exception as e:
                 print(f"⚠️  Skipping invalid path: {filepath} ({e})")
                 continue
