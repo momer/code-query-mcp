@@ -61,6 +61,11 @@ class SchemaMigrator:
         cursor = self.db.execute("SELECT version FROM schema_version WHERE version = '1.1.0'")
         if not cursor.fetchone():
             self._migrate_to_v1_1_0()
+        
+        # Migrate to v3 if needed (code-aware tokenizer)
+        cursor = self.db.execute("SELECT version FROM schema_version WHERE version = '3'")
+        if not cursor.fetchone():
+            self._migrate_to_v3_tokenizer()
     
     def _migrate_legacy_to_datasets(self):
         """Migrate from legacy schema to dataset-based schema."""
@@ -273,3 +278,61 @@ class SchemaMigrator:
         
         self.db.commit()
         logging.info("Successfully migrated to schema v1.1.0")
+    
+    def _migrate_to_v3_tokenizer(self):
+        """Add code-aware tokenizer configuration using a safe migration pattern."""
+        logging.info("Migrating to schema version 3: Code-aware tokenizer")
+        
+        temp_table_name = "files_fts_temp_v3"
+
+        try:
+            # Check if FTS table exists first
+            cursor = self.db.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='files_fts'
+            """)
+            fts_exists = cursor.fetchone() is not None
+            
+            if not fts_exists:
+                logging.info("No existing FTS table found, skipping tokenizer migration")
+                # Just mark the migration as complete since there's no FTS table to update
+                self.db.execute("INSERT OR REPLACE INTO schema_version (version) VALUES ('3')")
+                self.db.commit()
+                return
+            
+            logging.info(f"Creating new FTS table '{temp_table_name}' with updated tokenizer.")
+            # Step 1: Create the new table with a temporary name. Clean up if it exists from a prior failed run.
+            self.db.execute(f"DROP TABLE IF EXISTS {temp_table_name}")
+            self.db.execute(f"""
+                CREATE VIRTUAL TABLE {temp_table_name} USING fts5(
+                    dataset_id UNINDEXED,
+                    filepath, filename, overview, ddd_context,
+                    functions, exports, imports, types_interfaces_classes,
+                    constants, dependencies, other_notes, full_content,
+                    content='files',
+                    content_rowid='rowid',
+                    tokenize = 'unicode61 tokenchars ''._$@->:#'''
+                )
+            """)
+
+            logging.info(f"Rebuilding index for '{temp_table_name}'. This may take some time...")
+            # Step 2: Populate the new table. This is the long-running, fallible step.
+            self.db.execute(f"INSERT INTO {temp_table_name}({temp_table_name}) VALUES('rebuild')")
+            
+            # Step 3: Atomically (or as close as possible) swap the tables.
+            # The original table is only dropped AFTER the new one is successfully built.
+            logging.info("Swapping old FTS table with the new one.")
+            self.db.execute("DROP TABLE files_fts")
+            self.db.execute(f"ALTER TABLE {temp_table_name} RENAME TO files_fts")
+
+            # Step 4: Finalize the migration
+            self.db.execute("INSERT OR REPLACE INTO schema_version (version) VALUES ('3')")
+            self.db.commit()
+            logging.info("Schema migration to version 3 complete.")
+
+        except Exception as e:
+            logging.error(f"Migration to v3 failed: {e}. The original FTS table remains intact.")
+            # Attempt to clean up the temporary table
+            self.db.execute(f"DROP TABLE IF EXISTS {temp_table_name}")
+            # Re-raise the exception to halt the application startup and signal failure
+            raise

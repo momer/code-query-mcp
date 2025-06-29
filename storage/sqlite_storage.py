@@ -193,7 +193,8 @@ class CodeQueryServer:
                     other_notes,
                     full_content,
                     content='files',
-                    content_rowid='rowid'
+                    content_rowid='rowid',
+                    tokenize = 'unicode61 tokenchars ''._$@->:#'''
                 )
             """)
             
@@ -267,7 +268,8 @@ class CodeQueryServer:
                     other_notes,
                     full_content,
                     content='files',
-                    content_rowid='rowid'
+                    content_rowid='rowid',
+                    tokenize = 'unicode61 tokenchars ''._$@->:#'''
                 )
             """)
             
@@ -472,7 +474,7 @@ class CodeQueryServer:
             try:
                 cursor = self.db.execute("""
                     SELECT DISTINCT f.filepath, f.filename, f.overview, f.ddd_context,
-                           snippet(files_fts, 2, '[MATCH]', '[/MATCH]', '...', 64) as match_snippet
+                           snippet(files_fts, -1, '[MATCH]', '[/MATCH]', '...', 64) as match_snippet
                     FROM files f
                     JOIN files_fts ON f.rowid = files_fts.rowid
                     WHERE files_fts MATCH ?
@@ -486,7 +488,7 @@ class CodeQueryServer:
                 simple_query = ' '.join(query.split())  # Basic word tokenization
                 cursor = self.db.execute("""
                     SELECT DISTINCT f.filepath, f.filename, f.overview, f.ddd_context,
-                           snippet(files_fts, 2, '[MATCH]', '[/MATCH]', '...', 64) as match_snippet
+                           snippet(files_fts, -1, '[MATCH]', '[/MATCH]', '...', 64) as match_snippet
                     FROM files f
                     JOIN files_fts ON f.rowid = files_fts.rowid
                     WHERE files_fts MATCH ?
@@ -547,12 +549,9 @@ class CodeQueryServer:
         
         if cursor.fetchone():
             # Use FTS5 for search with focus on full_content
-            # Sanitize query for FTS5 by escaping special characters
-            import re
-            # Remove potentially problematic characters and escape quotes
-            fts_query = re.sub(r'[^\w\s".-]', ' ', query)
-            fts_query = fts_query.replace('"', '""')  # Escape quotes
-            fts_query = fts_query.strip()
+            base_fts_query = self._build_fts5_query(query)
+            # Scope the query to the full_content column
+            fts_query = f"full_content:({base_fts_query})"
             
             cursor = self.db.execute("""
                 SELECT f.filepath, f.filename, f.overview, f.ddd_context,
@@ -560,7 +559,7 @@ class CodeQueryServer:
                        rank
                 FROM files f
                 JOIN files_fts ON f.rowid = files_fts.rowid
-                WHERE files_fts MATCH ('full_content:' || ?)
+                WHERE files_fts MATCH ?
                 AND f.dataset_id = ?
                 ORDER BY rank
                 LIMIT ?
