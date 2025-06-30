@@ -18,7 +18,7 @@ class FTS5QueryBuilder:
         self.primary_strategy = primary_strategy or CodeAwareQueryStrategy()
         self.fallback_strategy = fallback_strategy or FallbackStrategy()
     
-    def build_query(self, user_query: str) -> str:
+    def build_query(self, user_query: Optional[str]) -> str:
         """
         Build FTS5 query from user input.
         
@@ -33,7 +33,7 @@ class FTS5QueryBuilder:
             
         return self.primary_strategy.build(user_query)
     
-    def build_fallback_query(self, user_query: str) -> str:
+    def build_fallback_query(self, user_query: Optional[str]) -> str:
         """
         Build a less strict query for fallback searches.
         
@@ -48,7 +48,7 @@ class FTS5QueryBuilder:
             
         return self.fallback_strategy.build(user_query)
     
-    def get_query_variants(self, user_query: str) -> List[str]:
+    def get_query_variants(self, user_query: Optional[str]) -> List[str]:
         """
         Get multiple query variants for progressive searching.
         
@@ -71,10 +71,9 @@ class FTS5QueryBuilder:
             variants.append(fallback)
         
         # Additional variants from fallback strategy
-        if hasattr(self.fallback_strategy, 'get_additional_variants'):
-            additional = self.fallback_strategy.get_additional_variants(user_query)
-            for variant in additional:
-                if variant not in variants:
-                    variants.append(variant)
+        additional = self.fallback_strategy.get_additional_variants(user_query)
+        for variant in additional:
+            if variant not in variants:
+                variants.append(variant)
         
         return variants

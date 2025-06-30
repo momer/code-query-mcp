@@ -58,18 +58,3 @@ def is_phrase_query(query: str) -> bool:
     query = query.strip()
     return query.startswith('"') and query.endswith('"')
 
-def split_camel_case(term: str) -> List[str]:
-    """Split camelCase term into words."""
-    # Handle all uppercase case
-    if term.isupper():
-        return [term]
-    
-    # Insert space before uppercase letters that follow lowercase
-    spaced = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', term)
-    # Also split consecutive uppercase letters when followed by lowercase
-    spaced = re.sub(r'(?<=[A-Z])(?=[A-Z][a-z])', ' ', spaced)
-    return spaced.split()
-
-def split_snake_case(term: str) -> List[str]:
-    """Split snake_case term into words."""
-    return term.split('_')

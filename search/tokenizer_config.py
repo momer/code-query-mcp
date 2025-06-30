@@ -1,5 +1,7 @@
 """Configuration for FTS5 tokenizer and code-aware searching."""
 
+import re
+
 # Characters configured in tokenizer (from PR 1)
 TOKENIZER_CHARS = '._$@->:#'
 
@@ -33,7 +35,6 @@ def is_code_pattern(term: str) -> bool:
         return True
     
     # Matches code patterns
-    import re
     for pattern in CODE_PATTERNS:
         if re.search(pattern, term):
             return True

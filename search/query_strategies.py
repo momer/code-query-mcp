@@ -13,6 +13,10 @@ class QueryStrategy(ABC):
     def build(self, query: str) -> str:
         """Build FTS5 query from user input."""
         pass
+    
+    def get_additional_variants(self, query: str) -> List[str]:
+        """Get additional query variants. Base implementation returns none."""
+        return []
 
 class DefaultQueryStrategy(QueryStrategy):
     """Basic FTS5 query building with minimal processing."""
@@ -51,46 +55,63 @@ class CodeAwareQueryStrategy(QueryStrategy):
     
     def _process_advanced_query(self, query: str) -> str:
         """Process query that already contains FTS5 operators."""
-        # Preserve user's operators but handle code patterns in terms
-        parts = []
-        tokens = query.split()
+        import re
+        # This regex finds:
+        # 1. Quoted phrases
+        # 2. FTS5 operators (AND, OR, NOT)
+        # 3. NEAR() function calls
+        # 4. Words (including those with * and code patterns)
+        # Match sequences that include word chars and code special chars
+        # Use a more specific pattern for tokens
+        # Match: quoted phrases | operators | NEAR function | regular words/code patterns
+        token_pattern = re.compile(
+            r'"[^"]+"|'                           # Quoted phrases
+            r'(?<![\w$@._:#])(?:AND|OR|NOT)(?![\w$@._:#])|'  # Operators with custom boundaries
+            r'NEAR\([^)]+\)|'                   # NEAR function
+            r'[$@_]?\w[\w$@._:#]*(?:->)?[\w$@._:#]*\*?',  # Words and code patterns
+            re.IGNORECASE
+        )
         
-        for token in tokens:
-            if token in {'AND', 'OR', 'NOT', 'NEAR'}:
-                parts.append(token)
-            elif token.startswith('"') and token.endswith('"'):
-                parts.append(token)  # Preserve quoted phrases
-            elif any(char in token for char in TOKENIZER_CHARS):
-                # Code pattern - quote it
+        parts = []
+        last_end = 0
+        for match in token_pattern.finditer(query):
+            # Add any non-matching text (like spaces)
+            parts.append(query[last_end:match.start()])
+            
+            token = match.group(0)
+            # Check if the token is a code pattern that isn't already quoted or an operator
+            if (not token.startswith('"') and 
+                not token.upper() in {'AND', 'OR', 'NOT'} and 
+                not token.upper().startswith('NEAR') and
+                any(char in token for char in TOKENIZER_CHARS)):
                 parts.append(f'"{escape_special_chars(token)}"')
             else:
-                parts.append(escape_special_chars(token))
+                parts.append(token)
+            last_end = match.end()
         
-        return ' '.join(parts)
+        # Add any trailing text
+        parts.append(query[last_end:])
+        
+        return ''.join(parts).strip()
     
     def _process_code_query(self, query: str) -> str:
         """Process as code-aware query."""
-        # Check if entire query is a code pattern
-        if any(char in query for char in TOKENIZER_CHARS):
-            # Complex - need to handle mixed terms
-            terms = extract_terms(query)
-            processed_terms = []
-            
-            for term in terms:
-                # Check each term individually
-                if any(char in term for char in TOKENIZER_CHARS):
-                    # This term is a code pattern, quote it
-                    processed_terms.append(f'"{escape_special_chars(term)}"')
-                else:
-                    # Regular term
-                    processed_terms.append(escape_special_chars(term))
-            
-            return ' '.join(processed_terms)
-        
-        # Regular terms, join with implicit AND
         terms = extract_terms(query)
-        escaped_terms = [escape_special_chars(term) for term in terms]
-        return ' '.join(escaped_terms)
+        processed_terms = []
+        
+        for term in terms:
+            # Check if the term is a code pattern or a multi-word phrase
+            is_code = any(char in term for char in TOKENIZER_CHARS)
+            is_phrase = ' ' in term
+            
+            if is_code or is_phrase:
+                # This term is a code pattern or an extracted phrase, quote it
+                processed_terms.append(f'"{escape_special_chars(term)}"')
+            else:
+                # Regular term
+                processed_terms.append(escape_special_chars(term))
+        
+        return ' '.join(processed_terms)
 
 class FallbackStrategy(QueryStrategy):
     """Provides multiple fallback approaches for failed queries."""

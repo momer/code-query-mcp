@@ -6,9 +6,7 @@ from search.query_utils import (
     extract_terms,
     detect_operators,
     normalize_whitespace,
-    is_phrase_query,
-    split_camel_case,
-    split_snake_case
+    is_phrase_query
 )
 
 class TestQueryUtils(unittest.TestCase):
@@ -82,21 +80,6 @@ class TestQueryUtils(unittest.TestCase):
         self.assertFalse(is_phrase_query('regular query'))
         self.assertFalse(is_phrase_query(''))
     
-    def test_split_camel_case(self):
-        """Test camelCase splitting."""
-        self.assertEqual(split_camel_case("camelCase"), ["camel", "Case"])
-        self.assertEqual(split_camel_case("getUserById"), ["get", "User", "By", "Id"])
-        # Splits before Http since it's uppercase followed by lowercase
-        self.assertEqual(split_camel_case("XMLHttpRequest"), ["XML", "Http", "Request"])
-        self.assertEqual(split_camel_case("lowercase"), ["lowercase"])
-        self.assertEqual(split_camel_case("UPPERCASE"), ["UPPERCASE"])
-    
-    def test_split_snake_case(self):
-        """Test snake_case splitting."""
-        self.assertEqual(split_snake_case("snake_case"), ["snake", "case"])
-        self.assertEqual(split_snake_case("get_user_by_id"), ["get", "user", "by", "id"])
-        self.assertEqual(split_snake_case("single"), ["single"])
-        self.assertEqual(split_snake_case("__private__"), ["", "", "private", "", ""])
 
 
 if __name__ == '__main__':
