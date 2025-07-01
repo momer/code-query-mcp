@@ -13,6 +13,8 @@ from .models import SearchResult, FileDocumentation, DatasetMetadata, BatchOpera
 from .connection_pool import ConnectionPool
 from .transaction import BatchTransaction
 from .migrations import SchemaMigrator
+from search.search_service import SearchService, SearchConfig, SearchMode
+from search.models import FileMetadata as SearchFileMetadata, SearchResult as SearchServiceResult
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +32,13 @@ class SqliteBackend(StorageBackend):
         'constants', 'dependencies', 'other_notes'
     }
     
-    def __init__(self, db_path: str, max_connections: int = 5):
+    def __init__(self, db_path: str, max_connections: int = 5, search_service: Optional[SearchService] = None):
         """Initialize SQLite backend.
         
         Args:
             db_path: Path to the SQLite database file
             max_connections: Maximum number of connections in pool
+            search_service: Optional SearchService instance for search operations
         """
         self.db_path = db_path
         self.connection_pool = ConnectionPool(db_path, max_connections=max_connections)
@@ -48,8 +51,15 @@ class SqliteBackend(StorageBackend):
         # Initialize schema
         self.ensure_schema()
         
+        # Initialize search service with self as the storage backend
+        self.search_service = search_service or SearchService(storage_backend=self)
+        
     def _build_fts5_query(self, query: str) -> str:
-        """Build a properly formatted FTS5 query from user input."""
+        """Build a properly formatted FTS5 query from user input.
+        
+        NOTE: This method is deprecated in favor of SearchService.
+        It's kept for backward compatibility but delegates to SearchService.
+        """
         # Basic query sanitization and formatting
         # This is a simplified version - you may want to expand this
         import re
@@ -73,6 +83,72 @@ class SqliteBackend(StorageBackend):
             snippet=row['snippet'],
             overview=row['overview'],
             ddd_context=row['ddd_context']
+        )
+        
+    def _search_service_result_to_storage_result(self, result: SearchServiceResult) -> SearchResult:
+        """Convert SearchService result to storage SearchResult."""
+        # Extract metadata fields if available
+        overview = None
+        ddd_context = None
+        filename = result.file_path.split('/')[-1] if result.file_path else ''
+        
+        if result.metadata:
+            overview = result.metadata.overview
+            ddd_context = result.metadata.ddd_context if hasattr(result.metadata, 'ddd_context') else None
+            filename = result.metadata.file_name
+        
+        return SearchResult(
+            filepath=result.file_path,
+            filename=filename,
+            dataset=result.dataset_id,
+            score=result.relevance_score,
+            snippet=result.snippet or result.match_content,
+            overview=overview,
+            ddd_context=ddd_context
+        )
+        
+    def _row_to_search_file_metadata(self, row: sqlite3.Row) -> SearchFileMetadata:
+        """Convert a database row to SearchFileMetadata for SearchService."""
+        # Convert Row to dict for easier access
+        row_dict = dict(row)
+        
+        # Parse JSON fields
+        functions = []
+        exports = []
+        
+        if row_dict.get('functions'):
+            try:
+                functions_data = json.loads(row_dict['functions'])
+                if isinstance(functions_data, dict):
+                    functions = list(functions_data.keys())
+                elif isinstance(functions_data, list):
+                    functions = functions_data
+            except (json.JSONDecodeError, TypeError):
+                pass
+                
+        if row_dict.get('exports'):
+            try:
+                exports_data = json.loads(row_dict['exports'])
+                if isinstance(exports_data, dict):
+                    exports = list(exports_data.keys())
+                elif isinstance(exports_data, list):
+                    exports = exports_data
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        return SearchFileMetadata(
+            file_id=row_dict.get('rowid', 0),
+            file_path=row_dict['filepath'],
+            file_name=row_dict['filename'],
+            file_extension=os.path.splitext(row_dict['filename'])[1] if row_dict.get('filename') else '',
+            file_size=0,  # Not stored in current schema
+            last_modified=row_dict.get('documented_at', ''),
+            content_hash='',  # Not stored in current schema
+            dataset_id=row_dict.get('dataset_id', row_dict.get('dataset', '')),
+            overview=row_dict.get('overview', ''),
+            language='',  # Not stored in current schema - could be inferred from extension
+            functions=functions,
+            exports=exports
         )
         
     def _doc_to_sql_params(self, doc: FileDocumentation) -> Dict[str, Any]:
@@ -104,31 +180,97 @@ class SqliteBackend(StorageBackend):
                     
         return FileDocumentation(**data)
         
-    # Search Operations
+    # Search Operations - Now delegating to SearchService
     def search_metadata(self, fts_query: str, dataset: str, limit: int = 10) -> List[SearchResult]:
         """Search against indexed metadata fields (excluding full_content)."""
-        clean_query = self._build_fts5_query(fts_query)
+        # Configure search for metadata only
+        config = SearchConfig(
+            search_mode=SearchMode.METADATA_ONLY,
+            max_results=limit,
+            enable_query_sanitization=True,
+            enable_fallback=True
+        )
         
-        # Build a query that searches specific metadata columns
-        # Exclude full_content from metadata search
-        metadata_columns = [
-            'filepath', 'filename', 'overview', 'ddd_context',
-            'functions', 'exports', 'imports', 'types_interfaces_classes',
-            'constants', 'dependencies', 'other_notes'
-        ]
+        # Use SearchService
+        results = self.search_service.search(fts_query, dataset, config)
         
-        # Create column-specific search query
-        column_queries = [f'{col}:({clean_query})' for col in metadata_columns]
-        combined_query = ' OR '.join(column_queries)
+        # Convert SearchService results to storage SearchResults
+        return [self._search_service_result_to_storage_result(r) for r in results]
+            
+    def search_content(self, fts_query: str, dataset: str, limit: int = 10) -> List[SearchResult]:
+        """Search against full file content."""
+        # Configure search for content only
+        config = SearchConfig(
+            search_mode=SearchMode.CONTENT_ONLY,
+            max_results=limit,
+            enable_query_sanitization=True,
+            enable_fallback=True
+        )
         
+        # Use SearchService
+        results = self.search_service.search(fts_query, dataset, config)
+        
+        # Convert SearchService results to storage SearchResults
+        return [self._search_service_result_to_storage_result(r) for r in results]
+            
+    def search_unified(self, fts_query: str, dataset: str, limit: int = 10) -> Tuple[List[SearchResult], List[SearchResult], Dict[str, int]]:
+        """Performs both metadata and content search with deduplication."""
+        # Configure unified search
+        config = SearchConfig(
+            search_mode=SearchMode.UNIFIED,
+            max_results=limit,
+            enable_query_sanitization=True,
+            enable_fallback=True,
+            deduplicate_results=True
+        )
+        
+        # Use SearchService for unified search
+        results = self.search_service.search(fts_query, dataset, config)
+        
+        # Separate results by type
+        metadata_results = []
+        content_results = []
+        
+        for result in results:
+            storage_result = self._search_service_result_to_storage_result(result)
+            if result.match_type == 'metadata':
+                metadata_results.append(storage_result)
+            else:
+                content_results.append(storage_result)
+        
+        # Compile statistics
+        stats = {
+            'total_metadata_matches': len(metadata_results),
+            'total_content_matches': len(content_results),
+            'unique_files': len(results),
+            'duplicate_matches': 0  # SearchService handles deduplication
+        }
+        
+        return metadata_results, content_results, stats
+        
+    # SearchService integration methods
+    def search_files(self, query: str, dataset_id: str, limit: int = 50, **kwargs) -> List[SearchFileMetadata]:
+        """Search files using FTS5 - called by SearchService.
+        
+        This method is used by SearchService for metadata searches.
+        """
         with self.connection_pool.get_connection() as conn:
             cursor = conn.execute("""
-                SELECT DISTINCT 
+                SELECT 
+                    f.rowid,
                     f.filepath,
                     f.filename,
-                    f.dataset_id as dataset,
+                    f.dataset_id,
                     f.overview,
                     f.ddd_context,
+                    f.functions,
+                    f.exports,
+                    f.imports,
+                    f.types_interfaces_classes,
+                    f.constants,
+                    f.dependencies,
+                    f.other_notes,
+                    f.documented_at,
                     snippet(files_fts, -1, '[MATCH]', '[/MATCH]', '...', 64) as snippet,
                     rank as score
                 FROM files f
@@ -137,67 +279,59 @@ class SqliteBackend(StorageBackend):
                 AND f.dataset_id = ?
                 ORDER BY rank
                 LIMIT ?
-            """, (combined_query, dataset, limit))
+            """, (query, dataset_id, limit))
             
-            return [self._row_to_search_result(row) for row in cursor]
+            return [self._row_to_search_file_metadata(row) for row in cursor]
             
-    def search_content(self, fts_query: str, dataset: str, limit: int = 10) -> List[SearchResult]:
-        """Search against full file content."""
-        clean_query = self._build_fts5_query(fts_query)
+    def search_full_content(self, query: str, dataset_id: str, limit: int = 50, include_snippets: bool = True, **kwargs) -> List[SearchServiceResult]:
+        """Search full content using FTS5 - called by SearchService.
         
+        This method is used by SearchService for content searches.
+        """
         with self.connection_pool.get_connection() as conn:
-            # Use a more sophisticated query that checks for content matches
-            # by verifying the search term appears in full_content
-            cursor = conn.execute("""
-                WITH matches AS (
-                    SELECT 
-                        f.filepath,
-                        f.filename,
-                        f.dataset_id as dataset,
-                        f.overview,
-                        f.ddd_context,
-                        f.full_content,
-                        snippet(files_fts, 12, '[MATCH]', '[/MATCH]', '...', 128) as snippet,
-                        rank as score
-                    FROM files f
-                    JOIN files_fts ON f.rowid = files_fts.rowid
-                    WHERE files_fts MATCH ?
-                    AND f.dataset_id = ?
-                )
+            # Configure snippet generation
+            snippet_sql = "snippet(files_fts, 12, '[MATCH]', '[/MATCH]', '...', 128)" if include_snippets else "''"
+            
+            cursor = conn.execute(f"""
                 SELECT 
-                    filepath, filename, dataset, overview, ddd_context, snippet, score
-                FROM matches
-                WHERE LOWER(full_content) LIKE '%' || LOWER(?) || '%'
-                ORDER BY score
+                    f.rowid,
+                    f.filepath,
+                    f.filename,
+                    f.dataset_id,
+                    f.overview,
+                    f.ddd_context,
+                    f.functions,
+                    f.exports,
+                    f.full_content,
+                    f.documented_at,
+                    {snippet_sql} as snippet,
+                    rank as score
+                FROM files f
+                JOIN files_fts ON f.rowid = files_fts.rowid
+                WHERE files_fts MATCH ?
+                AND f.dataset_id = ?
+                ORDER BY rank
                 LIMIT ?
-            """, (clean_query, dataset, clean_query, limit))
+            """, (query, dataset_id, limit))
             
-            return [self._row_to_search_result(row) for row in cursor]
-            
-    def search_unified(self, fts_query: str, dataset: str, limit: int = 10) -> Tuple[List[SearchResult], List[SearchResult], Dict[str, int]]:
-        """Performs both metadata and content search with deduplication."""
-        # Get results from both search types
-        metadata_results = self.search_metadata(fts_query, dataset, limit)
-        content_results = self.search_content(fts_query, dataset, limit)
-        
-        # Track which files we've seen in metadata results
-        metadata_files = {r.filepath for r in metadata_results}
-        
-        # Filter content results to only include files not in metadata results
-        content_only_results = [
-            r for r in content_results 
-            if r.filepath not in metadata_files
-        ]
-        
-        # Compile statistics
-        stats = {
-            'total_metadata_matches': len(metadata_results),
-            'total_content_matches': len(content_results),
-            'unique_files': len(metadata_files) + len(content_only_results),
-            'duplicate_matches': len(content_results) - len(content_only_results)
-        }
-        
-        return metadata_results, content_only_results, stats
+            results = []
+            for row in cursor:
+                # Convert row to metadata
+                metadata = self._row_to_search_file_metadata(row)
+                
+                # Create SearchServiceResult
+                result = SearchServiceResult(
+                    file_path=row['filepath'],
+                    dataset_id=row['dataset_id'],
+                    match_content=row['full_content'][:200] if row['full_content'] else '',
+                    match_type='content',
+                    relevance_score=-row['score'],  # Convert rank to score
+                    snippet=row['snippet'] if include_snippets else None,
+                    metadata=metadata
+                )
+                results.append(result)
+                
+            return results
         
     # Document Operations
     def get_file_documentation(self, filepath: str, dataset: str, include_content: bool = False) -> Optional[FileDocumentation]:
