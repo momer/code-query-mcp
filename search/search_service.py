@@ -4,9 +4,13 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass
 from enum import Enum
+import logging
 
-from ..storage.models import FileMetadata, SearchResult
+from .models import FileMetadata, SearchResult
 from .query_builder import FTS5QueryBuilder
+from .query_sanitizer import FTS5QuerySanitizer, SanitizationConfig
+
+logger = logging.getLogger(__name__)
 
 
 class SearchMode(Enum):
@@ -23,11 +27,16 @@ class SearchConfig:
     enable_code_aware: bool = True
     enable_snippet_generation: bool = True
     enable_relevance_scoring: bool = True
+    enable_query_sanitization: bool = True
+    enable_progressive_search: bool = True
     max_results: int = 50
     snippet_context_chars: int = 64
     min_relevance_score: float = 0.0
     search_mode: SearchMode = SearchMode.UNIFIED
     deduplicate_results: bool = True
+    query_timeout_ms: int = 5000
+    # Sanitization config
+    sanitization_config: Optional[SanitizationConfig] = None
 
 
 class SearchServiceInterface(ABC):
@@ -101,6 +110,7 @@ class SearchService(SearchServiceInterface):
         self,
         storage_backend,
         query_builder: Optional[FTS5QueryBuilder] = None,
+        query_sanitizer: Optional[FTS5QuerySanitizer] = None,
         default_config: Optional[SearchConfig] = None
     ):
         """
@@ -109,10 +119,12 @@ class SearchService(SearchServiceInterface):
         Args:
             storage_backend: The storage backend for executing queries
             query_builder: Optional query builder instance
+            query_sanitizer: Optional query sanitizer instance
             default_config: Optional default configuration
         """
         self.storage = storage_backend
         self.query_builder = query_builder or FTS5QueryBuilder()
+        self.query_sanitizer = query_sanitizer or FTS5QuerySanitizer()
         self.default_config = default_config or SearchConfig()
     
     def search(
@@ -145,10 +157,23 @@ class SearchService(SearchServiceInterface):
         """Search only in file metadata."""
         config = config or self.default_config
         
+        # Sanitize query if enabled
+        if config.enable_query_sanitization:
+            try:
+                sanitizer_config = config.sanitization_config or SanitizationConfig()
+                sanitizer = FTS5QuerySanitizer(sanitizer_config)
+                query = sanitizer.sanitize(query)
+                logger.debug(f"Sanitized query: {query}")
+            except ValueError as e:
+                logger.warning(f"Query sanitization failed: {e}")
+                # Return empty results for invalid queries
+                return []
+        
         # Build query variants if fallback enabled
         if config.enable_fallback:
             query_variants = self.query_builder.get_query_variants(query)
         else:
+            # Build single query (code-aware is default in build_query)
             query_variants = [self.query_builder.build_query(query)]
         
         results = []
@@ -191,10 +216,23 @@ class SearchService(SearchServiceInterface):
         """Search only in file content."""
         config = config or self.default_config
         
+        # Sanitize query if enabled
+        if config.enable_query_sanitization:
+            try:
+                sanitizer_config = config.sanitization_config or SanitizationConfig()
+                sanitizer = FTS5QuerySanitizer(sanitizer_config)
+                query = sanitizer.sanitize(query)
+                logger.debug(f"Sanitized query: {query}")
+            except ValueError as e:
+                logger.warning(f"Query sanitization failed: {e}")
+                # Return empty results for invalid queries
+                return []
+        
         # Build query variants if fallback enabled
         if config.enable_fallback:
             query_variants = self.query_builder.get_query_variants(query)
         else:
+            # Build single query (code-aware is default in build_query)
             query_variants = [self.query_builder.build_query(query)]
         
         results = []

@@ -16,6 +16,13 @@ from .query_utils import (
 )
 from .tokenizer_config import TOKENIZER_CHARS, CODE_OPERATORS
 from .query_sanitizer import FTS5QuerySanitizer, SanitizationConfig
+from .search_service import (
+    SearchService,
+    SearchServiceInterface,
+    SearchConfig,
+    SearchMode
+)
+from .models import FileMetadata, SearchResult
 
 __all__ = [
     # Query Builder
@@ -40,5 +47,15 @@ __all__ = [
     
     # Query Sanitizer
     'FTS5QuerySanitizer',
-    'SanitizationConfig'
+    'SanitizationConfig',
+    
+    # Search Service
+    'SearchService',
+    'SearchServiceInterface',
+    'SearchConfig',
+    'SearchMode',
+    
+    # Models
+    'FileMetadata',
+    'SearchResult'
 ]
