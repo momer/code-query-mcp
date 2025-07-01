@@ -9,6 +9,7 @@ import logging
 from .models import FileMetadata, SearchResult
 from .query_builder import FTS5QueryBuilder
 from .query_sanitizer import FTS5QuerySanitizer, SanitizationConfig
+from .progressive_search import ProgressiveSearchStrategy, create_default_progressive_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,8 @@ class SearchService(SearchServiceInterface):
         storage_backend,
         query_builder: Optional[FTS5QueryBuilder] = None,
         query_sanitizer: Optional[FTS5QuerySanitizer] = None,
-        default_config: Optional[SearchConfig] = None
+        default_config: Optional[SearchConfig] = None,
+        progressive_strategy: Optional[ProgressiveSearchStrategy] = None
     ):
         """
         Initialize search service.
@@ -121,11 +123,13 @@ class SearchService(SearchServiceInterface):
             query_builder: Optional query builder instance
             query_sanitizer: Optional query sanitizer instance
             default_config: Optional default configuration
+            progressive_strategy: Optional progressive search strategy
         """
         self.storage = storage_backend
         self.query_builder = query_builder or FTS5QueryBuilder()
         self.query_sanitizer = query_sanitizer or FTS5QuerySanitizer()
         self.default_config = default_config or SearchConfig()
+        self.progressive_strategy = progressive_strategy or create_default_progressive_strategy()
     
     def search(
         self,
@@ -169,43 +173,68 @@ class SearchService(SearchServiceInterface):
                 # Return empty results for invalid queries
                 return []
         
-        # Build query variants if fallback enabled
-        if config.enable_fallback:
-            query_variants = self.query_builder.get_query_variants(query)
-        else:
-            # Build single query (code-aware is default in build_query)
-            query_variants = [self.query_builder.build_query(query)]
-        
-        results = []
-        seen_paths = set()
-        
-        for variant in query_variants:
-            try:
-                # Execute metadata search
-                variant_results = self.storage.search_files(
-                    query=variant,
+        # Use progressive search if enabled
+        if config.enable_progressive_search and config.enable_fallback:
+            # Define search function for progressive strategy
+            def search_func(transformed_query: str) -> List[FileMetadata]:
+                return self.storage.search_files(
+                    query=transformed_query,
                     dataset_id=dataset_id,
                     limit=config.max_results
                 )
-                
-                # Deduplicate if enabled
-                if config.deduplicate_results:
-                    for result in variant_results:
-                        if result.file_path not in seen_paths:
-                            seen_paths.add(result.file_path)
-                            results.append(result)
-                else:
-                    results.extend(variant_results)
-                
-                # Stop if we have enough results
-                if len(results) >= config.max_results:
-                    break
+            
+            # Define deduplication function if needed
+            dedupe_func = (lambda r: r.file_path) if config.deduplicate_results else None
+            
+            # Execute progressive search
+            results = self.progressive_strategy.execute_search(
+                query=query,
+                search_func=search_func,
+                min_results=1,  # Try next strategy if no results
+                max_results=config.max_results,
+                deduplicate_func=dedupe_func
+            )
+            
+            return results
+        else:
+            # Original implementation for non-progressive search
+            # Build query variants if fallback enabled
+            if config.enable_fallback:
+                query_variants = self.query_builder.get_query_variants(query)
+            else:
+                # Build single query (code-aware is default in build_query)
+                query_variants = [self.query_builder.build_query(query)]
+            
+            results = []
+            seen_paths = set()
+            
+            for variant in query_variants:
+                try:
+                    # Execute metadata search
+                    variant_results = self.storage.search_files(
+                        query=variant,
+                        dataset_id=dataset_id,
+                        limit=config.max_results
+                    )
                     
-            except Exception:
-                # Continue with next variant on error
-                continue
-        
-        return results[:config.max_results]
+                    # Deduplicate if enabled
+                    if config.deduplicate_results:
+                        for result in variant_results:
+                            if result.file_path not in seen_paths:
+                                seen_paths.add(result.file_path)
+                                results.append(result)
+                    else:
+                        results.extend(variant_results)
+                    
+                    # Stop if we have enough results
+                    if len(results) >= config.max_results:
+                        break
+                        
+                except Exception:
+                    # Continue with next variant on error
+                    continue
+            
+            return results[:config.max_results]
     
     def search_content(
         self,
@@ -228,21 +257,12 @@ class SearchService(SearchServiceInterface):
                 # Return empty results for invalid queries
                 return []
         
-        # Build query variants if fallback enabled
-        if config.enable_fallback:
-            query_variants = self.query_builder.get_query_variants(query)
-        else:
-            # Build single query (code-aware is default in build_query)
-            query_variants = [self.query_builder.build_query(query)]
-        
-        results = []
-        seen_content = set()
-        
-        for variant in query_variants:
-            try:
-                # Execute content search
-                variant_results = self.storage.search_full_content(
-                    query=variant,
+        # Use progressive search if enabled
+        if config.enable_progressive_search and config.enable_fallback:
+            # Define search function for progressive strategy
+            def search_func(transformed_query: str) -> List[SearchResult]:
+                results = self.storage.search_full_content(
+                    query=transformed_query,
                     dataset_id=dataset_id,
                     limit=config.max_results,
                     include_snippets=config.enable_snippet_generation
@@ -250,30 +270,76 @@ class SearchService(SearchServiceInterface):
                 
                 # Apply relevance filter if enabled
                 if config.enable_relevance_scoring and config.min_relevance_score > 0:
-                    variant_results = [
-                        r for r in variant_results 
+                    results = [
+                        r for r in results 
                         if r.relevance_score >= config.min_relevance_score
                     ]
                 
-                # Deduplicate if enabled
-                if config.deduplicate_results:
-                    for result in variant_results:
-                        content_key = (result.file_path, result.match_content)
-                        if content_key not in seen_content:
-                            seen_content.add(content_key)
-                            results.append(result)
-                else:
-                    results.extend(variant_results)
-                
-                # Stop if we have enough results
-                if len(results) >= config.max_results:
-                    break
+                return results
+            
+            # Define deduplication function if needed
+            dedupe_func = (
+                lambda r: (r.file_path, r.match_content)
+            ) if config.deduplicate_results else None
+            
+            # Execute progressive search
+            results = self.progressive_strategy.execute_search(
+                query=query,
+                search_func=search_func,
+                min_results=1,  # Try next strategy if no results
+                max_results=config.max_results,
+                deduplicate_func=dedupe_func
+            )
+            
+            return results
+        else:
+            # Original implementation for non-progressive search
+            # Build query variants if fallback enabled
+            if config.enable_fallback:
+                query_variants = self.query_builder.get_query_variants(query)
+            else:
+                # Build single query (code-aware is default in build_query)
+                query_variants = [self.query_builder.build_query(query)]
+            
+            results = []
+            seen_content = set()
+            
+            for variant in query_variants:
+                try:
+                    # Execute content search
+                    variant_results = self.storage.search_full_content(
+                        query=variant,
+                        dataset_id=dataset_id,
+                        limit=config.max_results,
+                        include_snippets=config.enable_snippet_generation
+                    )
                     
-            except Exception:
-                # Continue with next variant on error
-                continue
-        
-        return results[:config.max_results]
+                    # Apply relevance filter if enabled
+                    if config.enable_relevance_scoring and config.min_relevance_score > 0:
+                        variant_results = [
+                            r for r in variant_results 
+                            if r.relevance_score >= config.min_relevance_score
+                        ]
+                    
+                    # Deduplicate if enabled
+                    if config.deduplicate_results:
+                        for result in variant_results:
+                            content_key = (result.file_path, result.match_content)
+                            if content_key not in seen_content:
+                                seen_content.add(content_key)
+                                results.append(result)
+                    else:
+                        results.extend(variant_results)
+                    
+                    # Stop if we have enough results
+                    if len(results) >= config.max_results:
+                        break
+                        
+                except Exception:
+                    # Continue with next variant on error
+                    continue
+            
+            return results[:config.max_results]
     
     def _unified_search(
         self,

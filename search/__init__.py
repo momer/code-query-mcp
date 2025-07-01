@@ -23,6 +23,11 @@ from .search_service import (
     SearchMode
 )
 from .models import FileMetadata, SearchResult
+from .progressive_search import (
+    ProgressiveSearchStrategy,
+    SearchStrategy,
+    create_default_progressive_strategy
+)
 
 __all__ = [
     # Query Builder
@@ -57,5 +62,10 @@ __all__ = [
     
     # Models
     'FileMetadata',
-    'SearchResult'
+    'SearchResult',
+    
+    # Progressive Search
+    'ProgressiveSearchStrategy',
+    'SearchStrategy',
+    'create_default_progressive_strategy'
 ]
