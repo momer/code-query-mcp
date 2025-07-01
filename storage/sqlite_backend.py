@@ -7,6 +7,9 @@ import dataclasses
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 import logging
+import threading
+import signal
+from contextlib import contextmanager
 
 from .backend import StorageBackend
 from .models import SearchResult, FileDocumentation, DatasetMetadata, BatchOperationResult
@@ -30,6 +33,13 @@ class SqliteBackend(StorageBackend):
     _DOC_JSON_FIELDS = {
         'functions', 'exports', 'imports', 'types_interfaces_classes',
         'constants', 'dependencies', 'other_notes'
+    }
+    
+    # Whitelist of updatable fields for security
+    _UPDATABLE_DOC_FIELDS = {
+        'filename', 'overview', 'ddd_context', 'functions', 'exports', 
+        'imports', 'types_interfaces_classes', 'constants', 'dependencies', 
+        'other_notes', 'full_content', 'documented_at_commit'
     }
     
     def __init__(self, db_path: str, max_connections: int = 5, search_service: Optional[SearchService] = None):
@@ -151,6 +161,52 @@ class SqliteBackend(StorageBackend):
             exports=exports
         )
         
+    @contextmanager
+    def _query_timeout(self, conn: sqlite3.Connection, timeout_ms: Optional[int] = None):
+        """Context manager for query timeout handling.
+        
+        Uses SQLite's interrupt mechanism to cancel long-running queries.
+        
+        Args:
+            conn: SQLite connection to monitor
+            timeout_ms: Timeout in milliseconds (None = no timeout)
+            
+        Yields:
+            The connection for query execution
+        """
+        if not timeout_ms or timeout_ms <= 0:
+            # No timeout requested
+            yield conn
+            return
+            
+        timer = None
+        interrupted = threading.Event()
+        
+        def interrupt_query():
+            """Interrupt the SQLite query after timeout."""
+            logger.warning(f"Query timeout after {timeout_ms}ms, interrupting...")
+            interrupted.set()
+            try:
+                conn.interrupt()
+            except Exception as e:
+                logger.error(f"Failed to interrupt query: {e}")
+        
+        try:
+            # Schedule the interrupt
+            timer = threading.Timer(timeout_ms / 1000.0, interrupt_query)
+            timer.start()
+            
+            yield conn
+            
+        finally:
+            # Cancel timer if query completed before timeout
+            if timer and timer.is_alive():
+                timer.cancel()
+                
+            # Check if we were interrupted
+            if interrupted.is_set():
+                raise TimeoutError(f"Query exceeded timeout of {timeout_ms}ms")
+        
     def _doc_to_sql_params(self, doc: FileDocumentation) -> Dict[str, Any]:
         """Convert a FileDocumentation DTO to a dict for SQL operations."""
         data = dataclasses.asdict(doc)
@@ -249,89 +305,106 @@ class SqliteBackend(StorageBackend):
         return metadata_results, content_results, stats
         
     # SearchService integration methods
-    def search_files(self, query: str, dataset_id: str, limit: int = 50, **kwargs) -> List[SearchFileMetadata]:
+    def search_files(self, query: str, dataset_id: str, limit: int = 50, timeout_ms: Optional[int] = None, **kwargs) -> List[SearchFileMetadata]:
         """Search files using FTS5 - called by SearchService.
         
         This method is used by SearchService for metadata searches.
+        
+        Args:
+            query: FTS5 search query
+            dataset_id: Dataset to search in
+            limit: Maximum results to return
+            timeout_ms: Query timeout in milliseconds
+            **kwargs: Additional parameters for future extensibility
         """
         with self.connection_pool.get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT 
-                    f.rowid,
-                    f.filepath,
-                    f.filename,
-                    f.dataset_id,
-                    f.overview,
-                    f.ddd_context,
-                    f.functions,
-                    f.exports,
-                    f.imports,
-                    f.types_interfaces_classes,
-                    f.constants,
-                    f.dependencies,
-                    f.other_notes,
-                    f.documented_at,
-                    snippet(files_fts, -1, '[MATCH]', '[/MATCH]', '...', 64) as snippet,
-                    rank as score
-                FROM files f
-                JOIN files_fts ON f.rowid = files_fts.rowid
-                WHERE files_fts MATCH ?
-                AND f.dataset_id = ?
-                ORDER BY rank
-                LIMIT ?
-            """, (query, dataset_id, limit))
+            with self._query_timeout(conn, timeout_ms):
+                cursor = conn.execute("""
+                    SELECT 
+                        f.rowid,
+                        f.filepath,
+                        f.filename,
+                        f.dataset_id,
+                        f.overview,
+                        f.ddd_context,
+                        f.functions,
+                        f.exports,
+                        f.imports,
+                        f.types_interfaces_classes,
+                        f.constants,
+                        f.dependencies,
+                        f.other_notes,
+                        f.documented_at,
+                        snippet(files_fts, -1, '[MATCH]', '[/MATCH]', '...', 64) as snippet,
+                        rank as score
+                    FROM files f
+                    JOIN files_fts ON f.rowid = files_fts.rowid
+                    WHERE files_fts MATCH ?
+                    AND f.dataset_id = ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, (query, dataset_id, limit))
+                
+                return [self._row_to_search_file_metadata(row) for row in cursor]
             
-            return [self._row_to_search_file_metadata(row) for row in cursor]
-            
-    def search_full_content(self, query: str, dataset_id: str, limit: int = 50, include_snippets: bool = True, **kwargs) -> List[SearchServiceResult]:
+    def search_full_content(self, query: str, dataset_id: str, limit: int = 50, include_snippets: bool = True, timeout_ms: Optional[int] = None, **kwargs) -> List[SearchServiceResult]:
         """Search full content using FTS5 - called by SearchService.
         
         This method is used by SearchService for content searches.
+        
+        Args:
+            query: FTS5 search query
+            dataset_id: Dataset to search in
+            limit: Maximum results to return
+            include_snippets: Whether to generate snippets
+            timeout_ms: Query timeout in milliseconds
+            **kwargs: Additional parameters for future extensibility
         """
         with self.connection_pool.get_connection() as conn:
-            # Configure snippet generation
-            snippet_sql = "snippet(files_fts, 12, '[MATCH]', '[/MATCH]', '...', 128)" if include_snippets else "''"
-            
-            cursor = conn.execute(f"""
-                SELECT 
-                    f.rowid,
-                    f.filepath,
-                    f.filename,
-                    f.dataset_id,
-                    f.overview,
-                    f.ddd_context,
-                    f.functions,
-                    f.exports,
-                    f.full_content,
-                    f.documented_at,
-                    {snippet_sql} as snippet,
-                    rank as score
-                FROM files f
-                JOIN files_fts ON f.rowid = files_fts.rowid
-                WHERE files_fts MATCH ?
-                AND f.dataset_id = ?
-                ORDER BY rank
-                LIMIT ?
-            """, (query, dataset_id, limit))
-            
-            results = []
-            for row in cursor:
-                # Convert row to metadata
-                metadata = self._row_to_search_file_metadata(row)
+            with self._query_timeout(conn, timeout_ms):
+                # Configure snippet generation
+                snippet_sql = "snippet(files_fts, 12, '[MATCH]', '[/MATCH]', '...', 128)" if include_snippets else "''"
                 
-                # Create SearchServiceResult
-                result = SearchServiceResult(
-                    file_path=row['filepath'],
-                    dataset_id=row['dataset_id'],
-                    match_content=row['full_content'][:200] if row['full_content'] else '',
-                    match_type='content',
-                    relevance_score=-row['score'],  # Convert rank to score
-                    snippet=row['snippet'] if include_snippets else None,
-                    metadata=metadata
-                )
-                results.append(result)
+                cursor = conn.execute(f"""
+                    SELECT 
+                        f.rowid,
+                        f.filepath,
+                        f.filename,
+                        f.dataset_id,
+                        f.overview,
+                        f.ddd_context,
+                        f.functions,
+                        f.exports,
+                        f.full_content,
+                        f.documented_at,
+                        {snippet_sql} as snippet,
+                        rank as score
+                    FROM files f
+                    JOIN files_fts ON f.rowid = files_fts.rowid
+                    WHERE files_fts MATCH ?
+                    AND f.dataset_id = ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, (query, dataset_id, limit))
                 
-            return results
+                results = []
+                for row in cursor:
+                    # Convert row to metadata
+                    metadata = self._row_to_search_file_metadata(row)
+                    
+                    # Create SearchServiceResult
+                    result = SearchServiceResult(
+                        file_path=row['filepath'],
+                        dataset_id=row['dataset_id'],
+                        match_content=row['full_content'][:200] if row['full_content'] else '',
+                        match_type='content',
+                        relevance_score=-row['score'],  # Convert rank to score
+                        snippet=row['snippet'] if include_snippets else None,
+                        metadata=metadata
+                    )
+                    results.append(result)
+                    
+                return results
         
     # Document Operations
     def get_file_documentation(self, filepath: str, dataset: str, include_content: bool = False) -> Optional[FileDocumentation]:
@@ -400,9 +473,6 @@ class SqliteBackend(StorageBackend):
                         documented_at=CURRENT_TIMESTAMP
                 """, sql_data)
                 
-                # Sync FTS table
-                conn.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
-                
             return True
             
         except Exception as e:
@@ -468,9 +538,6 @@ class SqliteBackend(StorageBackend):
                 affected = batch_tx.execute_batch(query, batch_data)
                 result.successful = len(batch_data)
                 
-                # Sync FTS table after batch insert
-                conn.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
-                
             except Exception as e:
                 logger.error(f"Batch insert failed: {e}")
                 result.failed = len(batch_data)
@@ -488,14 +555,24 @@ class SqliteBackend(StorageBackend):
         set_clauses = []
         params = {}
         
-        # Handle JSON fields
+        # Validate and filter fields for security
         for field, value in updates.items():
+            # Only allow whitelisted fields
+            if field not in self._UPDATABLE_DOC_FIELDS:
+                logger.warning(f"Attempted to update non-permitted field: {field}")
+                continue
+                
             if field in self._DOC_JSON_FIELDS and value is not None:
                 params[field] = json.dumps(value)
             else:
                 params[field] = value
                 
             set_clauses.append(f"{field} = :{field}")
+            
+        # If no valid fields to update, return early
+        if not set_clauses:
+            logger.warning("No valid fields to update")
+            return False
             
         # Add update timestamp
         set_clauses.append("documented_at = CURRENT_TIMESTAMP")
@@ -514,11 +591,7 @@ class SqliteBackend(StorageBackend):
         try:
             with self.connection_pool.transaction() as conn:
                 cursor = conn.execute(query, params)
-                if cursor.rowcount > 0:
-                    # Sync FTS table
-                    conn.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
-                    return True
-                return False
+                return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"Failed to update documentation: {e}")
             return False
@@ -533,11 +606,7 @@ class SqliteBackend(StorageBackend):
                     AND dataset_id = ?
                 """, (filepath, dataset))
                 
-                if cursor.rowcount > 0:
-                    # Sync FTS table
-                    conn.execute("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
-                    return True
-                return False
+                return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"Failed to delete documentation: {e}")
             return False
@@ -717,9 +786,39 @@ class SqliteBackend(StorageBackend):
                 )
             """)
             
-            # Populate FTS table with existing data
+            # Create triggers to keep FTS5 in sync with files table
             conn.execute("""
-                INSERT INTO files_fts(files_fts) VALUES('rebuild')
+                CREATE TRIGGER IF NOT EXISTS files_fts_insert AFTER INSERT ON files
+                BEGIN
+                    INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, 
+                        ddd_context, functions, exports, imports, types_interfaces_classes,
+                        constants, dependencies, other_notes, full_content)
+                    VALUES (new.rowid, new.dataset_id, new.filepath, new.filename, new.overview,
+                        new.ddd_context, new.functions, new.exports, new.imports, 
+                        new.types_interfaces_classes, new.constants, new.dependencies, 
+                        new.other_notes, new.full_content);
+                END
+            """)
+            
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS files_fts_delete AFTER DELETE ON files
+                BEGIN
+                    DELETE FROM files_fts WHERE rowid = old.rowid;
+                END
+            """)
+            
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS files_fts_update AFTER UPDATE ON files
+                BEGIN
+                    DELETE FROM files_fts WHERE rowid = old.rowid;
+                    INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, 
+                        ddd_context, functions, exports, imports, types_interfaces_classes,
+                        constants, dependencies, other_notes, full_content)
+                    VALUES (new.rowid, new.dataset_id, new.filepath, new.filename, new.overview,
+                        new.ddd_context, new.functions, new.exports, new.imports, 
+                        new.types_interfaces_classes, new.constants, new.dependencies, 
+                        new.other_notes, new.full_content);
+                END
             """)
         
         # Schema version table

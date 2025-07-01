@@ -10,6 +10,7 @@ from .models import FileMetadata, SearchResult
 from .query_builder import FTS5QueryBuilder
 from .query_sanitizer import FTS5QuerySanitizer, SanitizationConfig
 from .progressive_search import ProgressiveSearchStrategy, create_default_progressive_strategy
+from .query_analyzer import QueryComplexityAnalyzer, ComplexityLevel
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class SearchConfig:
     enable_relevance_scoring: bool = True
     enable_query_sanitization: bool = True
     enable_progressive_search: bool = True
+    enable_complexity_analysis: bool = True
     max_results: int = 50
     snippet_context_chars: int = 64
     min_relevance_score: float = 0.0
@@ -38,6 +40,9 @@ class SearchConfig:
     query_timeout_ms: int = 5000
     # Sanitization config
     sanitization_config: Optional[SanitizationConfig] = None
+    # Complexity thresholds
+    max_query_terms: int = 50
+    max_query_cost: float = 100.0
 
 
 class SearchServiceInterface(ABC):
@@ -112,6 +117,7 @@ class SearchService(SearchServiceInterface):
         storage_backend,
         query_builder: Optional[FTS5QueryBuilder] = None,
         query_sanitizer: Optional[FTS5QuerySanitizer] = None,
+        query_analyzer: Optional[QueryComplexityAnalyzer] = None,
         default_config: Optional[SearchConfig] = None,
         progressive_strategy: Optional[ProgressiveSearchStrategy] = None
     ):
@@ -122,12 +128,14 @@ class SearchService(SearchServiceInterface):
             storage_backend: The storage backend for executing queries
             query_builder: Optional query builder instance
             query_sanitizer: Optional query sanitizer instance
+            query_analyzer: Optional query complexity analyzer instance
             default_config: Optional default configuration
             progressive_strategy: Optional progressive search strategy
         """
         self.storage = storage_backend
         self.query_builder = query_builder or FTS5QueryBuilder()
         self.query_sanitizer = query_sanitizer or FTS5QuerySanitizer()
+        self.query_analyzer = query_analyzer or QueryComplexityAnalyzer()
         self.default_config = default_config or SearchConfig()
         self.progressive_strategy = progressive_strategy or create_default_progressive_strategy()
     
@@ -161,12 +169,29 @@ class SearchService(SearchServiceInterface):
         """Search only in file metadata."""
         config = config or self.default_config
         
+        # Analyze query complexity if enabled
+        if config.enable_complexity_analysis:
+            # Configure analyzer with current config settings
+            self.query_analyzer.max_terms = config.max_query_terms
+            self.query_analyzer.max_cost = config.max_query_cost
+            metrics = self.query_analyzer.analyze(query)
+            
+            if metrics.complexity_level == ComplexityLevel.TOO_COMPLEX:
+                logger.warning(
+                    f"Query too complex: {', '.join(metrics.warnings)}"
+                )
+                # Optionally return empty results or raise exception
+                return []
+            elif metrics.warnings:
+                logger.info(f"Query complexity warnings: {', '.join(metrics.warnings)}")
+        
         # Sanitize query if enabled
         if config.enable_query_sanitization:
             try:
-                sanitizer_config = config.sanitization_config or SanitizationConfig()
-                sanitizer = FTS5QuerySanitizer(sanitizer_config)
-                query = sanitizer.sanitize(query)
+                # Use injected sanitizer, update config if needed
+                if config.sanitization_config:
+                    self.query_sanitizer.config = config.sanitization_config
+                query = self.query_sanitizer.sanitize(query)
                 logger.debug(f"Sanitized query: {query}")
             except ValueError as e:
                 logger.warning(f"Query sanitization failed: {e}")
@@ -180,7 +205,8 @@ class SearchService(SearchServiceInterface):
                 return self.storage.search_files(
                     query=transformed_query,
                     dataset_id=dataset_id,
-                    limit=config.max_results
+                    limit=config.max_results,
+                    timeout_ms=config.query_timeout_ms
                 )
             
             # Define deduplication function if needed
@@ -214,7 +240,8 @@ class SearchService(SearchServiceInterface):
                     variant_results = self.storage.search_files(
                         query=variant,
                         dataset_id=dataset_id,
-                        limit=config.max_results
+                        limit=config.max_results,
+                        timeout_ms=config.query_timeout_ms
                     )
                     
                     # Deduplicate if enabled
@@ -230,7 +257,8 @@ class SearchService(SearchServiceInterface):
                     if len(results) >= config.max_results:
                         break
                         
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Search failed for query variant '{variant}': {e}", exc_info=True)
                     # Continue with next variant on error
                     continue
             
@@ -245,12 +273,29 @@ class SearchService(SearchServiceInterface):
         """Search only in file content."""
         config = config or self.default_config
         
+        # Analyze query complexity if enabled
+        if config.enable_complexity_analysis:
+            # Configure analyzer with current config settings
+            self.query_analyzer.max_terms = config.max_query_terms
+            self.query_analyzer.max_cost = config.max_query_cost
+            metrics = self.query_analyzer.analyze(query)
+            
+            if metrics.complexity_level == ComplexityLevel.TOO_COMPLEX:
+                logger.warning(
+                    f"Query too complex: {', '.join(metrics.warnings)}"
+                )
+                # Optionally return empty results or raise exception
+                return []
+            elif metrics.warnings:
+                logger.info(f"Query complexity warnings: {', '.join(metrics.warnings)}")
+        
         # Sanitize query if enabled
         if config.enable_query_sanitization:
             try:
-                sanitizer_config = config.sanitization_config or SanitizationConfig()
-                sanitizer = FTS5QuerySanitizer(sanitizer_config)
-                query = sanitizer.sanitize(query)
+                # Use injected sanitizer, update config if needed
+                if config.sanitization_config:
+                    self.query_sanitizer.config = config.sanitization_config
+                query = self.query_sanitizer.sanitize(query)
                 logger.debug(f"Sanitized query: {query}")
             except ValueError as e:
                 logger.warning(f"Query sanitization failed: {e}")
@@ -265,7 +310,8 @@ class SearchService(SearchServiceInterface):
                     query=transformed_query,
                     dataset_id=dataset_id,
                     limit=config.max_results,
-                    include_snippets=config.enable_snippet_generation
+                    include_snippets=config.enable_snippet_generation,
+                    timeout_ms=config.query_timeout_ms
                 )
                 
                 # Apply relevance filter if enabled
@@ -311,7 +357,8 @@ class SearchService(SearchServiceInterface):
                         query=variant,
                         dataset_id=dataset_id,
                         limit=config.max_results,
-                        include_snippets=config.enable_snippet_generation
+                        include_snippets=config.enable_snippet_generation,
+                        timeout_ms=config.query_timeout_ms
                     )
                     
                     # Apply relevance filter if enabled
@@ -335,7 +382,8 @@ class SearchService(SearchServiceInterface):
                     if len(results) >= config.max_results:
                         break
                         
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Search failed for query variant '{variant}': {e}", exc_info=True)
                     # Continue with next variant on error
                     continue
             

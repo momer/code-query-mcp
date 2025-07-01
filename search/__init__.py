@@ -28,6 +28,11 @@ from .progressive_search import (
     SearchStrategy,
     create_default_progressive_strategy
 )
+from .query_analyzer import (
+    QueryComplexityAnalyzer,
+    ComplexityLevel,
+    ComplexityMetrics
+)
 
 __all__ = [
     # Query Builder
@@ -67,5 +72,10 @@ __all__ = [
     # Progressive Search
     'ProgressiveSearchStrategy',
     'SearchStrategy',
-    'create_default_progressive_strategy'
+    'create_default_progressive_strategy',
+    
+    # Query Analyzer
+    'QueryComplexityAnalyzer',
+    'ComplexityLevel',
+    'ComplexityMetrics'
 ]
