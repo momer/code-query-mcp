@@ -139,20 +139,26 @@ class TestQueryComplexityAnalyzer(unittest.TestCase):
     
     def test_custom_thresholds(self):
         """Test analyzer with custom thresholds."""
-        # Strict analyzer
-        strict_analyzer = QueryComplexityAnalyzer(
+        # Use default analyzer with custom thresholds passed per-call
+        
+        # Should be too complex with strict limits
+        metrics = self.analyzer.analyze(
+            "one two three four five six",
             max_terms=5,
             max_operators=2,
             max_wildcards=1,
             max_cost=10.0
         )
-        
-        # Should be too complex with strict limits
-        metrics = strict_analyzer.analyze("one two three four five six")
         self.assertEqual(metrics.complexity_level, ComplexityLevel.TOO_COMPLEX)
         
         # Should pass with fewer terms
-        metrics = strict_analyzer.analyze("one two three")
+        metrics = self.analyzer.analyze(
+            "one two three",
+            max_terms=5,
+            max_operators=2,
+            max_wildcards=1,
+            max_cost=10.0
+        )
         self.assertNotEqual(metrics.complexity_level, ComplexityLevel.TOO_COMPLEX)
     
     def test_is_too_complex(self):

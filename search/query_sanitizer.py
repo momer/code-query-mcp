@@ -54,12 +54,13 @@ class FTS5QuerySanitizer:
         """Initialize sanitizer with configuration."""
         self.config = config or SanitizationConfig()
     
-    def sanitize(self, query: str) -> str:
+    def sanitize(self, query: str, config: Optional[SanitizationConfig] = None) -> str:
         """
         Sanitize FTS5 query while preserving legitimate functionality.
         
         Args:
             query: Raw user query
+            config: Optional configuration to override instance defaults
             
         Returns:
             Sanitized query safe for FTS5
@@ -70,8 +71,11 @@ class FTS5QuerySanitizer:
         if not query or not query.strip():
             return '""'
         
+        # Use provided config or fall back to instance config
+        config = config or self.config
+        
         # Check for column filters if not allowed
-        if not self.config.allow_column_filters:
+        if not config.allow_column_filters:
             if self.COLUMN_FILTER_PATTERN.search(query):
                 # Remove column filters rather than rejecting query
                 query = self.COLUMN_FILTER_PATTERN.sub(' ', query)
@@ -80,15 +84,15 @@ class FTS5QuerySanitizer:
         self._original_query = query
         
         # Extract and validate components
-        components = self._extract_query_components(query)
+        components = self._extract_query_components(query, config)
         
-        # Validate complexity
-        self._validate_complexity(components)
+        # Validate complexity with config
+        self._validate_complexity(components, config)
         
-        # Reconstruct sanitized query
-        return self._reconstruct_query(components)
+        # Reconstruct sanitized query with config
+        return self._reconstruct_query(components, config)
     
-    def _extract_query_components(self, query: str) -> dict:
+    def _extract_query_components(self, query: str, config: SanitizationConfig) -> dict:
         """Extract query components for processing."""
         components = {
             'phrases': [],
@@ -110,8 +114,8 @@ class FTS5QuerySanitizer:
         for i, match in enumerate(self.QUOTED_PHRASE_PATTERN.finditer(query)):
             phrase_content = match.group(1)
             # Validate phrase length
-            if len(phrase_content) > self.config.max_phrase_length:
-                phrase_content = phrase_content[:self.config.max_phrase_length]
+            if len(phrase_content) > config.max_phrase_length:
+                phrase_content = phrase_content[:config.max_phrase_length]
             
             # Store sanitized phrase - don't double quotes that are already doubled
             safe_phrase = phrase_content  # Already has proper quote escaping
@@ -245,7 +249,7 @@ class FTS5QuerySanitizer:
                 continue
             
             # Check for wildcards
-            if self.config.allow_wildcards and '*' in token:
+            if config.allow_wildcards and '*' in token:
                 # Validate wildcard usage (must be at end of term)
                 if token.endswith('*') and token.count('*') == 1 and len(token) > 1:
                     components['wildcards'].append(token)
@@ -281,14 +285,14 @@ class FTS5QuerySanitizer:
         
         return ' '.join(safe_terms)
     
-    def _validate_complexity(self, components: dict) -> None:
+    def _validate_complexity(self, components: dict, config: SanitizationConfig) -> None:
         """Validate query complexity to prevent DoS."""
         wildcard_count = len(components['wildcards'])
         
-        if wildcard_count > self.config.max_wildcards:
+        if wildcard_count > config.max_wildcards:
             raise ValueError(
                 f"Query contains too many wildcards ({wildcard_count} > "
-                f"{self.config.max_wildcards}). Please be more specific."
+                f"{config.max_wildcards}). Please be more specific."
             )
         
         # Check total term count
@@ -305,7 +309,7 @@ class FTS5QuerySanitizer:
                 "Query is too complex. Please simplify your search."
             )
     
-    def _reconstruct_query(self, components: dict) -> str:
+    def _reconstruct_query(self, components: dict, config: SanitizationConfig) -> str:
         """Reconstruct sanitized query from components."""
         if not components['ordered_components'] and not components['phrases'] and not components['near_clauses']:
             return '""'

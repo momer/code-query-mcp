@@ -362,30 +362,52 @@ class SqliteBackend(StorageBackend):
         """
         with self.connection_pool.get_connection() as conn:
             with self._query_timeout(conn, timeout_ms):
-                # Configure snippet generation
-                snippet_sql = "snippet(files_fts, 12, '[MATCH]', '[/MATCH]', '...', 128)" if include_snippets else "''"
+                if include_snippets:
+                    sql = """
+                        SELECT 
+                            f.rowid,
+                            f.filepath,
+                            f.filename,
+                            f.dataset_id,
+                            f.overview,
+                            f.ddd_context,
+                            f.functions,
+                            f.exports,
+                            f.full_content,
+                            f.documented_at,
+                            snippet(files_fts, 12, '[MATCH]', '[/MATCH]', '...', 128) as snippet,
+                            rank as score
+                        FROM files f
+                        JOIN files_fts ON f.rowid = files_fts.rowid
+                        WHERE files_fts MATCH ?
+                        AND f.dataset_id = ?
+                        ORDER BY rank
+                        LIMIT ?
+                    """
+                else:
+                    sql = """
+                        SELECT 
+                            f.rowid,
+                            f.filepath,
+                            f.filename,
+                            f.dataset_id,
+                            f.overview,
+                            f.ddd_context,
+                            f.functions,
+                            f.exports,
+                            f.full_content,
+                            f.documented_at,
+                            '' as snippet,
+                            rank as score
+                        FROM files f
+                        JOIN files_fts ON f.rowid = files_fts.rowid
+                        WHERE files_fts MATCH ?
+                        AND f.dataset_id = ?
+                        ORDER BY rank
+                        LIMIT ?
+                    """
                 
-                cursor = conn.execute(f"""
-                    SELECT 
-                        f.rowid,
-                        f.filepath,
-                        f.filename,
-                        f.dataset_id,
-                        f.overview,
-                        f.ddd_context,
-                        f.functions,
-                        f.exports,
-                        f.full_content,
-                        f.documented_at,
-                        {snippet_sql} as snippet,
-                        rank as score
-                    FROM files f
-                    JOIN files_fts ON f.rowid = files_fts.rowid
-                    WHERE files_fts MATCH ?
-                    AND f.dataset_id = ?
-                    ORDER BY rank
-                    LIMIT ?
-                """, (query, dataset_id, limit))
+                cursor = conn.execute(sql, (query, dataset_id, limit))
                 
                 results = []
                 for row in cursor:
@@ -409,9 +431,6 @@ class SqliteBackend(StorageBackend):
     # Document Operations
     def get_file_documentation(self, filepath: str, dataset: str, include_content: bool = False) -> Optional[FileDocumentation]:
         """Retrieve file documentation."""
-        # Handle partial path matching
-        filepath_pattern = f"%{filepath}" if not filepath.startswith('/') else filepath
-        
         with self.connection_pool.get_connection() as conn:
             # Build query based on whether we need content
             select_fields = """
@@ -427,10 +446,9 @@ class SqliteBackend(StorageBackend):
             cursor = conn.execute(f"""
                 SELECT {select_fields}
                 FROM files
-                WHERE filepath LIKE ?
+                WHERE filepath = ?
                 AND dataset_id = ?
-                LIMIT 1
-            """, (filepath_pattern, dataset))
+            """, (filepath, dataset))
             
             row = cursor.fetchone()
             if not row:

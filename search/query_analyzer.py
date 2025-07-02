@@ -72,11 +72,24 @@ class QueryComplexityAnalyzer:
         self.max_wildcards = max_wildcards
         self.max_cost = max_cost
         
-    def analyze(self, query: str) -> ComplexityMetrics:
+    def analyze(
+        self, 
+        query: str,
+        max_terms: Optional[int] = None,
+        max_operators: Optional[int] = None,
+        max_nesting: Optional[int] = None,
+        max_wildcards: Optional[int] = None,
+        max_cost: Optional[float] = None
+    ) -> ComplexityMetrics:
         """Analyze query complexity.
         
         Args:
             query: FTS5 query string to analyze
+            max_terms: Maximum number of search terms (overrides instance default)
+            max_operators: Maximum number of boolean operators (overrides instance default)
+            max_nesting: Maximum parentheses nesting depth (overrides instance default)
+            max_wildcards: Maximum number of wildcard operators (overrides instance default)
+            max_cost: Maximum estimated query cost (overrides instance default)
             
         Returns:
             ComplexityMetrics with analysis results
@@ -93,6 +106,13 @@ class QueryComplexityAnalyzer:
                 complexity_level=ComplexityLevel.SIMPLE,
                 warnings=[]
             )
+        
+        # Use provided thresholds or fall back to instance defaults
+        max_terms = max_terms if max_terms is not None else self.max_terms
+        max_operators = max_operators if max_operators is not None else self.max_operators
+        max_nesting = max_nesting if max_nesting is not None else self.max_nesting
+        max_wildcards = max_wildcards if max_wildcards is not None else self.max_wildcards
+        max_cost = max_cost if max_cost is not None else self.max_cost
         
         # Count various query components
         term_count = self._count_terms(query)
@@ -117,7 +137,12 @@ class QueryComplexityAnalyzer:
             operator_count=operator_count,
             nesting_depth=nesting_depth,
             wildcard_count=wildcard_count,
-            cost=cost
+            cost=cost,
+            max_terms=max_terms,
+            max_operators=max_operators,
+            max_nesting=max_nesting,
+            max_wildcards=max_wildcards,
+            max_cost=max_cost
         )
         
         return ComplexityMetrics(
@@ -132,16 +157,36 @@ class QueryComplexityAnalyzer:
             warnings=warnings
         )
         
-    def is_too_complex(self, query: str) -> bool:
+    def is_too_complex(
+        self, 
+        query: str,
+        max_terms: Optional[int] = None,
+        max_operators: Optional[int] = None,
+        max_nesting: Optional[int] = None,
+        max_wildcards: Optional[int] = None,
+        max_cost: Optional[float] = None
+    ) -> bool:
         """Quick check if query is too complex.
         
         Args:
             query: FTS5 query string
+            max_terms: Maximum number of search terms (overrides instance default)
+            max_operators: Maximum number of boolean operators (overrides instance default)
+            max_nesting: Maximum parentheses nesting depth (overrides instance default)
+            max_wildcards: Maximum number of wildcard operators (overrides instance default)
+            max_cost: Maximum estimated query cost (overrides instance default)
             
         Returns:
             True if query exceeds complexity thresholds
         """
-        metrics = self.analyze(query)
+        metrics = self.analyze(
+            query,
+            max_terms=max_terms,
+            max_operators=max_operators,
+            max_nesting=max_nesting,
+            max_wildcards=max_wildcards,
+            max_cost=max_cost
+        )
         return metrics.complexity_level == ComplexityLevel.TOO_COMPLEX
         
     def _count_terms(self, query: str) -> int:
@@ -233,33 +278,38 @@ class QueryComplexityAnalyzer:
         operator_count: int,
         nesting_depth: int,
         wildcard_count: int,
-        cost: float
+        cost: float,
+        max_terms: int,
+        max_operators: int,
+        max_nesting: int,
+        max_wildcards: int,
+        max_cost: float
     ) -> Tuple[ComplexityLevel, List[str]]:
         """Determine complexity level and generate warnings."""
         warnings = []
         
         # Check individual limits
-        if term_count > self.max_terms:
-            warnings.append(f"Too many terms ({term_count} > {self.max_terms})")
+        if term_count > max_terms:
+            warnings.append(f"Too many terms ({term_count} > {max_terms})")
             
-        if operator_count > self.max_operators:
-            warnings.append(f"Too many operators ({operator_count} > {self.max_operators})")
+        if operator_count > max_operators:
+            warnings.append(f"Too many operators ({operator_count} > {max_operators})")
             
-        if nesting_depth > self.max_nesting:
-            warnings.append(f"Too deeply nested ({nesting_depth} > {self.max_nesting})")
+        if nesting_depth > max_nesting:
+            warnings.append(f"Too deeply nested ({nesting_depth} > {max_nesting})")
             
-        if wildcard_count > self.max_wildcards:
-            warnings.append(f"Too many wildcards ({wildcard_count} > {self.max_wildcards})")
+        if wildcard_count > max_wildcards:
+            warnings.append(f"Too many wildcards ({wildcard_count} > {max_wildcards})")
             
-        if cost > self.max_cost:
-            warnings.append(f"Query too expensive (cost {cost:.1f} > {self.max_cost})")
+        if cost > max_cost:
+            warnings.append(f"Query too expensive (cost {cost:.1f} > {max_cost})")
         
         # Determine overall complexity
         if warnings:
             return ComplexityLevel.TOO_COMPLEX, warnings
-        elif cost > self.max_cost * 0.7:
+        elif cost > max_cost * 0.7:
             return ComplexityLevel.COMPLEX, ["Query approaching complexity limits"]
-        elif cost > self.max_cost * 0.3:
+        elif cost > max_cost * 0.3:
             return ComplexityLevel.MODERATE, []
         else:
             return ComplexityLevel.SIMPLE, []

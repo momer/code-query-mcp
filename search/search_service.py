@@ -171,10 +171,12 @@ class SearchService(SearchServiceInterface):
         
         # Analyze query complexity if enabled
         if config.enable_complexity_analysis:
-            # Configure analyzer with current config settings
-            self.query_analyzer.max_terms = config.max_query_terms
-            self.query_analyzer.max_cost = config.max_query_cost
-            metrics = self.query_analyzer.analyze(query)
+            # Pass config values directly to the analyze method
+            metrics = self.query_analyzer.analyze(
+                query,
+                max_terms=config.max_query_terms,
+                max_cost=config.max_query_cost
+            )
             
             if metrics.complexity_level == ComplexityLevel.TOO_COMPLEX:
                 logger.warning(
@@ -188,10 +190,8 @@ class SearchService(SearchServiceInterface):
         # Sanitize query if enabled
         if config.enable_query_sanitization:
             try:
-                # Use injected sanitizer, update config if needed
-                if config.sanitization_config:
-                    self.query_sanitizer.config = config.sanitization_config
-                query = self.query_sanitizer.sanitize(query)
+                # Pass config to sanitize method instead of setting on instance
+                query = self.query_sanitizer.sanitize(query, config=config.sanitization_config)
                 logger.debug(f"Sanitized query: {query}")
             except ValueError as e:
                 logger.warning(f"Query sanitization failed: {e}")
@@ -275,10 +275,12 @@ class SearchService(SearchServiceInterface):
         
         # Analyze query complexity if enabled
         if config.enable_complexity_analysis:
-            # Configure analyzer with current config settings
-            self.query_analyzer.max_terms = config.max_query_terms
-            self.query_analyzer.max_cost = config.max_query_cost
-            metrics = self.query_analyzer.analyze(query)
+            # Pass config values directly to the analyze method
+            metrics = self.query_analyzer.analyze(
+                query,
+                max_terms=config.max_query_terms,
+                max_cost=config.max_query_cost
+            )
             
             if metrics.complexity_level == ComplexityLevel.TOO_COMPLEX:
                 logger.warning(
@@ -292,10 +294,8 @@ class SearchService(SearchServiceInterface):
         # Sanitize query if enabled
         if config.enable_query_sanitization:
             try:
-                # Use injected sanitizer, update config if needed
-                if config.sanitization_config:
-                    self.query_sanitizer.config = config.sanitization_config
-                query = self.query_sanitizer.sanitize(query)
+                # Pass config to sanitize method instead of setting on instance
+                query = self.query_sanitizer.sanitize(query, config=config.sanitization_config)
                 logger.debug(f"Sanitized query: {query}")
             except ValueError as e:
                 logger.warning(f"Query sanitization failed: {e}")
