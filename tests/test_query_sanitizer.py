@@ -128,6 +128,32 @@ class TestFTS5QuerySanitizer(unittest.TestCase):
             self.sanitizer.sanitize("NEAR($user get_id, 2)"),
             'NEAR("$user" "get_id", 2)'
         )
+        
+        # NEAR with terms containing quotes
+        # When quotes form valid phrases, they're extracted first
+        result = self.sanitizer.sanitize('NEAR(foo"bar test"case, 5)')
+        # The quoted part "bar test" is extracted as a phrase first
+        self.assertEqual(result, 'NEAR("foo__PHRASE_0__case", 5)')
+        
+        # Another case with quotes forming phrases
+        result = self.sanitizer.sanitize('NEAR(get"value set"value, 3)')
+        # "value set" is extracted as a phrase
+        self.assertEqual(result, 'NEAR("get__PHRASE_0__value", 3)')
+        
+        # Direct test of the internal method to verify our fix
+        # This tests that when terms with quotes are passed to _sanitize_near_terms,
+        # the quotes are properly escaped
+        from search.query_sanitizer import FTS5QuerySanitizer
+        sanitizer = FTS5QuerySanitizer()
+        
+        # Test 1: Simple terms with quotes
+        sanitized_terms = sanitizer._sanitize_near_terms('user"s data"s')
+        self.assertEqual(sanitized_terms, '"user""s" "data""s"')
+        
+        # Test 2: Terms that look like they have quotes but are actually clean
+        # after the phrase extraction phase
+        sanitized_terms = sanitizer._sanitize_near_terms('foo__PHRASE_0__bar test__PHRASE_1__case')
+        self.assertEqual(sanitized_terms, '"foo__PHRASE_0__bar" "test__PHRASE_1__case"')
     
     def test_column_filters(self):
         """Test column filter handling."""

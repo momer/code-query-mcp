@@ -83,6 +83,18 @@ class TestQueryComplexityAnalyzer(unittest.TestCase):
         # Complex escaping scenario
         metrics = self.analyzer.analyze('test* "quoted \\"nested\\" text*" real*')
         self.assertEqual(metrics.wildcard_count, 2)
+        
+        # Edge case: escaped quote at end of phrase with wildcard
+        metrics = self.analyzer.analyze('start* "phrase with escaped quote \\" and a wildcard*" end*')
+        self.assertEqual(metrics.wildcard_count, 2)
+        
+        # Multiple escaped quotes in one phrase
+        metrics = self.analyzer.analyze('a* "this \\" has \\" multiple \\" quotes*" b*')
+        self.assertEqual(metrics.wildcard_count, 2)
+        
+        # Escaped backslash before quote
+        metrics = self.analyzer.analyze('test* "escaped backslash \\\\ before quote*" real*')
+        self.assertEqual(metrics.wildcard_count, 2)
     
     def test_phrase_counting(self):
         """Test counting of quoted phrases."""

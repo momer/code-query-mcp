@@ -80,9 +80,6 @@ class FTS5QuerySanitizer:
                 # Remove column filters rather than rejecting query
                 query = self.COLUMN_FILTER_PATTERN.sub(' ', query)
         
-        # Store original query for column filter preservation
-        self._original_query = query
-        
         # Extract and validate components
         components = self._extract_query_components(query, config)
         
@@ -281,7 +278,9 @@ class FTS5QuerySanitizer:
             # Remove any special characters that could break NEAR syntax
             clean_term = term.strip('"*^,')  # Also strip commas
             if clean_term and not clean_term.isdigit():  # Don't quote numbers (distances)
-                safe_terms.append(f'"{clean_term}"')
+                # Escape internal quotes before wrapping the term in quotes
+                escaped_term = clean_term.replace('"', '""')
+                safe_terms.append(f'"{escaped_term}"')
         
         return ' '.join(safe_terms)
     

@@ -220,27 +220,15 @@ class QueryComplexityAnalyzer:
         
     def _count_wildcards(self, query: str) -> int:
         """Count wildcard operators."""
-        # Count asterisks not inside quotes
-        in_quotes = False
-        wildcard_count = 0
-        escaped = False
+        # Pattern to match quoted strings, accounting for escaped quotes
+        # This is the same robust pattern used in the sanitizer
+        quoted_phrase_pattern = re.compile(r'"([^"\\]|\\.)*"')
         
-        for i, char in enumerate(query):
-            if escaped:
-                # Skip this character, it's escaped
-                escaped = False
-                continue
-                
-            if char == '\\':
-                # Next character is escaped
-                escaped = True
-            elif char == '"':
-                # Toggle quote state only if not escaped
-                in_quotes = not in_quotes
-            elif char == '*' and not in_quotes:
-                wildcard_count += 1
-                
-        return wildcard_count
+        # Remove all quoted phrases from the query string
+        query_without_phrases = quoted_phrase_pattern.sub('', query)
+        
+        # Count the remaining asterisks
+        return query_without_phrases.count('*')
         
     def _count_phrases(self, query: str) -> int:
         """Count quoted phrases."""

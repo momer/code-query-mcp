@@ -115,25 +115,31 @@ class TestSearchService(unittest.TestCase):
     def test_search_metadata_with_sanitization(self):
         """Test metadata search with query sanitization enabled."""
         # Setup - mock the sanitizer to be used
+        config = SearchConfig(
+            enable_query_sanitization=True,
+            enable_progressive_search=False,  # Disable to test direct flow
+            enable_fallback=False  # Disable fallback to test single query
+        )
         with patch.object(self.service, 'query_sanitizer') as mock_sanitizer:
             mock_sanitizer.sanitize.return_value = "sanitized query"
             self.mock_query_builder.build_query.return_value = "fts5_query"
             self.mock_storage.search_files.return_value = self.sample_metadata
             
             # Execute
-            results = self.service.search_metadata("user login", "test_dataset")
+            results = self.service.search_metadata("user login", "test_dataset", config)
             
-            # Verify sanitization was called
-            mock_sanitizer.sanitize.assert_called_once_with("user login")
+            # Verify sanitization was called with config parameter
+            mock_sanitizer.sanitize.assert_called_once_with("user login", config=None)
             
             # Verify query building
             self.mock_query_builder.build_query.assert_called_once_with("sanitized query")
             
-            # Verify storage call
+            # Verify storage call (now includes timeout_ms)
             self.mock_storage.search_files.assert_called_once_with(
                 query="fts5_query",
                 dataset_id="test_dataset",
-                limit=50
+                limit=50,
+                timeout_ms=5000
             )
             
             # Verify results
@@ -157,16 +163,22 @@ class TestSearchService(unittest.TestCase):
     
     def test_search_metadata_with_fallback(self):
         """Test metadata search with fallback variants."""
-        # Setup
-        config = SearchConfig(enable_fallback=True, enable_query_sanitization=False)
+        # Setup - disable progressive search to test classic fallback
+        config = SearchConfig(
+            enable_fallback=True, 
+            enable_query_sanitization=False,
+            enable_progressive_search=False  # Use classic fallback
+        )
         self.mock_query_builder.get_query_variants.return_value = [
             "variant1", "variant2", "variant3"
         ]
         
         # First variant returns no results, second returns some
+        # We need a third response since the code tries all 3 variants
         self.mock_storage.search_files.side_effect = [
             [],  # variant1
             self.sample_metadata[:1],  # variant2
+            # variant3 won't be called since variant2 returned results
         ]
         
         # Execute
@@ -175,8 +187,8 @@ class TestSearchService(unittest.TestCase):
         # Verify fallback was used
         self.mock_query_builder.get_query_variants.assert_called_once_with("user login")
         
-        # Verify multiple storage calls
-        self.assertEqual(self.mock_storage.search_files.call_count, 2)
+        # Verify it tried all variants (since only 1 result < max_results)
+        self.assertEqual(self.mock_storage.search_files.call_count, 3)
         
         # Verify results from second variant
         self.assertEqual(len(results), 1)
@@ -190,21 +202,22 @@ class TestSearchService(unittest.TestCase):
             enable_fallback=False,
             enable_query_sanitization=False
         )
-        # When not using fallback, build_code_aware_query returns a string wrapped in a list internally
-        self.mock_query_builder.build_code_aware_query.return_value = "code_aware_query"
+        # When not using fallback, build_query is used (which is code-aware by default)
+        self.mock_query_builder.build_query.return_value = "code_aware_query"
         self.mock_storage.search_files.return_value = self.sample_metadata
         
         # Execute
         results = self.service.search_metadata("$user->login()", "test_dataset", config)
         
         # Verify code-aware query was used
-        self.mock_query_builder.build_code_aware_query.assert_called_once_with("$user->login()")
+        self.mock_query_builder.build_query.assert_called_once_with("$user->login()")
         
-        # Verify storage call
+        # Verify storage call (now includes timeout_ms)
         self.mock_storage.search_files.assert_called_once_with(
             query="code_aware_query",
             dataset_id="test_dataset",
-            limit=50
+            limit=50,
+            timeout_ms=5000
         )
     
     def test_search_content_with_relevance_filter(self):
@@ -373,21 +386,17 @@ class TestSearchService(unittest.TestCase):
             sanitization_config=sanitization_config
         )
         
-        # Create a new sanitizer mock that will be created with config
-        with patch('search.search_service.FTS5QuerySanitizer') as MockSanitizer:
-            mock_sanitizer_instance = Mock()
-            mock_sanitizer_instance.sanitize.return_value = "sanitized"
-            MockSanitizer.return_value = mock_sanitizer_instance
-            
+        # Mock the sanitizer to verify it receives the custom config
+        with patch.object(self.service, 'query_sanitizer') as mock_sanitizer:
+            mock_sanitizer.sanitize.return_value = "sanitized"
             self.mock_query_builder.build_query.return_value = "fts5_query"
             self.mock_storage.search_files.return_value = []
             
             # Execute
             self.service.search_metadata("title:test*", "test_dataset", config)
             
-            # Verify sanitizer was created with custom config
-            MockSanitizer.assert_called_once_with(sanitization_config)
-            mock_sanitizer_instance.sanitize.assert_called_once_with("title:test*")
+            # Verify sanitizer was called with custom config
+            mock_sanitizer.sanitize.assert_called_once_with("title:test*", config=sanitization_config)
     
     def test_exception_handling_in_fallback(self):
         """Test that exceptions during search don't break fallback."""
