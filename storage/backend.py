@@ -1,8 +1,11 @@
 """Abstract storage backend interface for Code Query MCP Server."""
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from .models import SearchResult, FileDocumentation, DatasetMetadata, BatchOperationResult
+
+if TYPE_CHECKING:
+    from dataset.dataset_models import DatasetStats
 
 
 class StorageBackend(ABC):
@@ -75,6 +78,20 @@ class StorageBackend(ABC):
             
         Returns:
             FileDocumentation object or None if not found
+        """
+        pass
+    
+    @abstractmethod
+    def get_file_documentation_batch(self, dataset: str, filepaths: List[str], include_content: bool = False) -> Dict[str, FileDocumentation]:
+        """Retrieve documentation for multiple files in a single query.
+        
+        Args:
+            dataset: Dataset identifier
+            filepaths: List of file paths to retrieve
+            include_content: Whether to include full file content
+            
+        Returns:
+            Dictionary mapping filepath to FileDocumentation (only includes found files)
         """
         pass
         
@@ -232,6 +249,50 @@ class StorageBackend(ABC):
         
         Returns:
             True if schema is ready, False on error
+        """
+        pass
+        
+    # Additional Dataset Operations
+    @abstractmethod
+    def delete_all_documentation(self, dataset_id: str) -> int:
+        """Delete all documentation for a dataset.
+        
+        Args:
+            dataset_id: ID of the dataset
+            
+        Returns:
+            Number of documents deleted
+        """
+        pass
+        
+    @abstractmethod
+    def get_dataset_statistics(self, dataset_id: str) -> "DatasetStats":
+        """Calculate and return statistics for a dataset efficiently.
+        
+        This should be implemented with optimized queries to avoid N+1 problems.
+        
+        Args:
+            dataset_id: ID of the dataset
+            
+        Returns:
+            DatasetStats object with comprehensive statistics
+        """
+        pass
+        
+    @abstractmethod
+    def transaction(self):
+        """Context manager for transactional operations.
+        
+        Usage:
+            with storage.transaction() as txn_storage:
+                # All operations on txn_storage happen in a transaction
+                txn_storage.create_dataset(...)
+                txn_storage.insert_documentation(...)
+            # Transaction is committed when context exits successfully
+            # Transaction is rolled back on exception
+            
+        Returns:
+            A transactional storage backend instance
         """
         pass
         

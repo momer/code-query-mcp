@@ -456,6 +456,44 @@ class SqliteBackend(StorageBackend):
                 
             # Use helper method to convert row to DTO
             return self._row_to_doc(row)
+    
+    def get_file_documentation_batch(self, dataset: str, filepaths: List[str], include_content: bool = False) -> Dict[str, FileDocumentation]:
+        """Retrieve documentation for multiple files in a single query."""
+        if not filepaths:
+            return {}
+            
+        with self.connection_pool.get_connection() as conn:
+            # Build query based on whether we need content
+            select_fields = """
+                filepath, filename, dataset_id, overview, ddd_context,
+                functions, exports, imports, types_interfaces_classes,
+                constants, dependencies, other_notes,
+                documented_at_commit, documented_at
+            """
+            
+            if include_content:
+                select_fields += ", full_content"
+                
+            # Create placeholders for SQL IN clause
+            placeholders = ','.join(['?' for _ in filepaths])
+            
+            # Prepare parameters: dataset_id followed by all filepaths
+            params = [dataset] + filepaths
+            
+            cursor = conn.execute(f"""
+                SELECT {select_fields}
+                FROM files
+                WHERE dataset_id = ?
+                AND filepath IN ({placeholders})
+            """, params)
+            
+            # Build result dictionary
+            result = {}
+            for row in cursor:
+                doc = self._row_to_doc(row)
+                result[doc.filepath] = doc
+                
+            return result
             
     def insert_documentation(self, doc: FileDocumentation) -> bool:
         """Insert or update file documentation."""
@@ -924,6 +962,176 @@ class SqliteBackend(StorageBackend):
             
         return info
         
+    # Additional Dataset Operations for DatasetService
+    def delete_all_documentation(self, dataset_id: str) -> int:
+        """Delete all documentation for a dataset."""
+        try:
+            with self.connection_pool.get_connection() as conn:
+                # Count files to be deleted
+                cursor = conn.execute(
+                    "SELECT COUNT(*) as count FROM files WHERE dataset_id = ?",
+                    (dataset_id,)
+                )
+                count = cursor.fetchone()['count']
+                
+                # Delete all files for the dataset
+                conn.execute("DELETE FROM files WHERE dataset_id = ?", (dataset_id,))
+                conn.commit()
+                
+                logger.info(f"Deleted {count} files from dataset '{dataset_id}'")
+                return count
+                
+        except Exception as e:
+            logger.error(f"Failed to delete all documentation for dataset '{dataset_id}': {e}")
+            return 0
+            
+    def get_dataset_statistics(self, dataset_id: str) -> "DatasetStats":
+        """Calculate and return statistics for a dataset efficiently."""
+        from dataset.dataset_models import DatasetStats
+        from datetime import datetime
+        
+        try:
+            with self.connection_pool.get_connection() as conn:
+                # Get basic counts and stats
+                cursor = conn.execute("""
+                    SELECT 
+                        COUNT(*) as total_files,
+                        SUM(LENGTH(full_content)) as total_size,
+                        MAX(documented_at) as last_updated
+                    FROM files 
+                    WHERE dataset_id = ?
+                """, (dataset_id,))
+                
+                row = cursor.fetchone()
+                total_files = row['total_files'] or 0
+                total_size = row['total_size'] or 0
+                last_updated = row['last_updated'] or datetime.now().isoformat()
+                
+                # Get file type distribution by extracting extension from filename
+                cursor = conn.execute("""
+                    SELECT 
+                        CASE 
+                            WHEN INSTR(filename, '.') > 0 
+                            THEN LOWER(SUBSTR(filename, INSTR(filename, '.') + 1))
+                            ELSE ''
+                        END as file_extension,
+                        COUNT(*) as count
+                    FROM files
+                    WHERE dataset_id = ?
+                    GROUP BY file_extension
+                    ORDER BY count DESC
+                """, (dataset_id,))
+                
+                file_types = {}
+                for row in cursor:
+                    ext = row['file_extension']
+                    if ext:  # Only include files with extensions
+                        file_types[f'.{ext}'] = row['count']
+                
+                # Get largest files by content length
+                cursor = conn.execute("""
+                    SELECT 
+                        filepath,
+                        LENGTH(full_content) as file_size
+                    FROM files
+                    WHERE dataset_id = ?
+                    AND full_content IS NOT NULL
+                    ORDER BY file_size DESC
+                    LIMIT 10
+                """, (dataset_id,))
+                
+                largest_files = [(row['filepath'], row['file_size']) for row in cursor]
+                
+                return DatasetStats(
+                    dataset_id=dataset_id,
+                    total_files=total_files,
+                    total_size_bytes=total_size,
+                    last_updated=datetime.fromisoformat(last_updated) if isinstance(last_updated, str) else last_updated,
+                    file_types=file_types,
+                    largest_files=largest_files
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to get statistics for dataset '{dataset_id}': {e}")
+            # Return empty stats on error
+            return DatasetStats(
+                dataset_id=dataset_id,
+                total_files=0,
+                total_size_bytes=0,
+                last_updated=datetime.now(),
+                file_types={},
+                largest_files=[]
+            )
+            
+    def transaction(self):
+        """Context manager for transactional operations."""
+        return TransactionalSqliteBackend(self)
+        
     def close(self):
         """Close the backend and clean up resources."""
         self.connection_pool.close()
+
+
+class TransactionalSqliteBackend:
+    """Wrapper for SqliteBackend that provides transaction support.
+    
+    This is a simplified implementation that creates a new SqliteBackend instance
+    with a single connection for transaction support.
+    """
+    
+    def __init__(self, parent_backend: SqliteBackend):
+        self.parent = parent_backend
+        self.backend = None
+        self._conn_context = None
+        
+    def __enter__(self):
+        """Begin transaction."""
+        # Get a connection from the pool
+        self._conn_context = self.parent.connection_pool.get_connection()
+        conn = self._conn_context.__enter__()
+        
+        # Start transaction
+        conn.execute("BEGIN IMMEDIATE")
+        
+        # Create a new backend that uses this single connection
+        # This is a temporary backend just for this transaction
+        self.backend = SqliteBackend(self.parent.db_path)
+        
+        # Override the backend's connection pool to use our single connection
+        # This is a bit of a hack, but it ensures all operations use the same connection
+        class SingleConnectionPool:
+            def __init__(self, connection):
+                self.conn = connection
+                
+            def get_connection(self):
+                # Return a context manager that yields the connection
+                class ConnectionContext:
+                    def __init__(self, conn):
+                        self.conn = conn
+                    def __enter__(self):
+                        return self.conn
+                    def __exit__(self, *args):
+                        pass  # Don't close the connection
+                return ConnectionContext(self.conn)
+                
+            def close(self):
+                pass  # Don't close, parent will handle it
+                
+        self.backend.connection_pool = SingleConnectionPool(conn)
+        return self.backend
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Commit or rollback transaction."""
+        if self._conn_context:
+            conn = self._conn_context.__enter__()  # Get the actual connection
+            try:
+                if exc_type is None:
+                    conn.commit()
+                else:
+                    conn.rollback()
+            finally:
+                # Clean up
+                self._conn_context.__exit__(None, None, None)
+                self._conn_context = None
+                self.backend = None
+        return False

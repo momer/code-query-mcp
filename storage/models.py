@@ -47,6 +47,7 @@ class FileDocumentation:
     full_content: Optional[str] = None
     documented_at_commit: Optional[str] = None
     documented_at: Optional[datetime] = None
+    content_hash: Optional[str] = None
 
 
 @dataclass
@@ -59,6 +60,7 @@ class DatasetMetadata:
     dataset_type: str = 'main'
     parent_dataset_id: Optional[str] = None
     source_branch: Optional[str] = None
+    updated_at: Optional[datetime] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -69,7 +71,8 @@ class DatasetMetadata:
             'loaded_at': self.loaded_at.isoformat() if self.loaded_at else None,
             'dataset_type': self.dataset_type,
             'parent_dataset_id': self.parent_dataset_id,
-            'source_branch': self.source_branch
+            'source_branch': self.source_branch,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
 
