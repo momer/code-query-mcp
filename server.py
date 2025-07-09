@@ -21,6 +21,9 @@ from mcp.server.lowlevel import NotificationOptions
 from helpers.git_helper import get_git_info, get_worktree_info, get_main_worktree_path
 from storage.sqlite_storage import CodeQueryServer
 from tools.mcp_tools import get_tools
+from config.config_service import ConfigurationService
+from config.project_config import HookType
+from config.utils import check_jq_installed
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -47,6 +50,7 @@ os.makedirs(DB_DIR, exist_ok=True)
 # Initialize server
 server = Server("code-query")
 query_server = CodeQueryServer(DB_PATH, DB_DIR)
+config_service = ConfigurationService(DB_DIR)
 
 
 
@@ -172,21 +176,175 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
     elif name == "get_project_config":
-        result = query_server.get_project_config()
+        # Use new configuration service
+        config = config_service.get_config()
+        status = config_service.get_configuration_status()
+        
+        # Get database status from query_server
+        db_status = query_server.get_status()
+        
+        # Build response compatible with existing interface
+        result = {
+            "success": True,
+            "project_root": str(config_service.base_path),
+            "config_file": {
+                "exists": status.is_configured,
+                "path": status.config_path if status.is_configured else None,
+                "content": config.to_dict() if config else None
+            },
+            "git": {
+                "is_repository": len(status.hooks_installed) >= 0,  # GitHookManager validates git
+                "hooks": {
+                    "pre_commit": HookType.PRE_COMMIT in status.hooks_installed,
+                    "post_merge": HookType.POST_MERGE in status.hooks_installed
+                }
+            },
+            "database": db_status,
+            "setup_complete": status.is_configured and (db_status.get('dataset_count', 0) > 0)
+        }
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
     elif name == "install_pre_commit_hook":
         dataset_name = arguments.get("dataset_name", "")
         mode = arguments.get("mode", "queue")
-        result = query_server.install_pre_commit_hook(dataset_name, mode)
+        
+        # Check if jq is installed (required by current hooks)
+        jq_installed, jq_error = check_jq_installed()
+        if not jq_installed:
+            result = {
+                "success": False,
+                **jq_error
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        
+        # Install hook using new service
+        success, message = config_service.install_git_hook(
+            HookType.PRE_COMMIT,
+            dataset_name=dataset_name,
+            mode=mode
+        )
+        
+        result = {
+            "success": success,
+            "message": message
+        }
+        
+        if success:
+            hook_path = config_service.git_manager.get_hook_path(HookType.PRE_COMMIT)
+            if hook_path:
+                result["hook_path"] = str(hook_path)
+            result["next_steps"] = [
+                "The pre-commit hook will queue changed files for documentation",
+                "Run document_directory to process queued files"
+            ]
+            
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
     elif name == "create_project_config":
         dataset_name = arguments.get("dataset_name", "")
         exclude_patterns = arguments.get("exclude_patterns")
         model = arguments.get("model")
-        result = query_server.create_project_config(dataset_name, exclude_patterns, model)
-        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        
+        # Check for worktree and handle dataset forking
+        wt_info = get_worktree_info(config_service.base_path)
+        actual_dataset_name = dataset_name
+        auto_fork_info = None
+        
+        if wt_info and wt_info['is_worktree']:
+            # Handle worktree-specific dataset naming and forking
+            main_path = wt_info['main_path']
+            sanitized_branch = wt_info['sanitized_branch']
+            
+            # Try to find main dataset from main worktree's config
+            main_config_service = ConfigurationService(main_path)
+            main_config = main_config_service.get_config()
+            main_dataset = main_config.default_dataset if main_config else dataset_name
+            
+            # Log worktree detection for debugging
+            logging.info(f"Worktree detected: branch={wt_info['branch']}, main_dataset={main_dataset}")
+            
+            # Create worktree-specific dataset name
+            wt_dataset_name = f"{main_dataset}_{sanitized_branch}"
+            logging.info(f"Worktree dataset name: {wt_dataset_name}")
+            
+            # Check if we need to fork the dataset
+            if query_server.db:
+                cursor = query_server.db.execute(
+                    "SELECT COUNT(*) as count FROM files WHERE dataset_id = ?",
+                    (wt_dataset_name,)
+                )
+                wt_exists = cursor.fetchone()['count'] > 0
+                
+                if not wt_exists:
+                    # Check if main dataset exists to fork from
+                    cursor = query_server.db.execute(
+                        "SELECT COUNT(*) as count FROM files WHERE dataset_id = ?",
+                        (main_dataset,)
+                    )
+                    main_exists = cursor.fetchone()['count'] > 0
+                    
+                    if main_exists:
+                        # Fork the main dataset
+                        fork_result = query_server.fork_dataset(main_dataset, wt_dataset_name)
+                        if fork_result['success']:
+                            auto_fork_info = {
+                                "forked": True,
+                                "from": main_dataset,
+                                "to": wt_dataset_name,
+                                "files": fork_result.get('files_copied', 0)
+                            }
+            
+            actual_dataset_name = wt_dataset_name
+        
+        # Create config using new service
+        try:
+            config = config_service.create_config(
+                project_name=dataset_name,
+                default_dataset=actual_dataset_name,
+                ignored_patterns=exclude_patterns or None
+            )
+            
+            # Build response with worktree information
+            response = {
+                "success": True,
+                "message": f"Created project configuration for dataset '{actual_dataset_name}'",
+                "config_path": str(config_service.storage.config_path),
+                "config": config.to_dict()
+            }
+            
+            # Add worktree-specific information
+            if wt_info and wt_info['is_worktree']:
+                if auto_fork_info:
+                    response["message"] = (
+                        f"✅ Git worktree detected! Created isolated dataset '{actual_dataset_name}' "
+                        f"for branch '{wt_info['branch']}' by copying {auto_fork_info['files']} files "
+                        f"from main dataset '{auto_fork_info['from']}'."
+                    )
+                else:
+                    response["message"] = (
+                        f"✅ Git worktree detected! Created configuration for isolated dataset "
+                        f"'{actual_dataset_name}' for branch '{wt_info['branch']}'."
+                    )
+                    
+                response["worktree_dataset_info"] = {
+                    "note": "This is a git worktree - data will be stored in a separate dataset",
+                    "worktree_dataset": actual_dataset_name,
+                    "main_dataset": main_dataset,
+                    "branch": wt_info['branch'],
+                    "data_isolation": "All operations in this worktree will use the worktree-specific dataset",
+                    "important": f"IMPORTANT: Your data was {'copied from' if auto_fork_info else 'will be isolated from'} the main dataset. Changes in this worktree will not affect the main dataset."
+                }
+                
+            if auto_fork_info:
+                response["auto_fork_info"] = auto_fork_info
+                
+        except Exception as e:
+            response = {
+                "success": False,
+                "message": f"Error creating project config: {str(e)}"
+            }
+            
+        return [TextContent(type="text", text=json.dumps(response, indent=2))]
     
     elif name == "fork_dataset":
         source_dataset = arguments.get("source_dataset", "")
@@ -196,7 +354,50 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
     
     elif name == "install_post_merge_hook":
         main_dataset = arguments.get("main_dataset")
-        result = query_server.install_post_merge_hook(main_dataset)
+        
+        # Check if jq is installed (required by post-merge hook)
+        jq_installed, jq_error = check_jq_installed()
+        if not jq_installed:
+            result = {
+                "success": False,
+                **jq_error
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        
+        # If no main dataset provided, try to get from config
+        if not main_dataset:
+            config = config_service.get_config()
+            if config:
+                main_dataset = config.default_dataset
+                
+        if not main_dataset:
+            result = {
+                "success": False,
+                "message": "No main dataset specified and couldn't find one in config."
+            }
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        
+        # Install hook using new service
+        success, message = config_service.install_git_hook(
+            HookType.POST_MERGE,
+            dataset_name=main_dataset
+        )
+        
+        result = {
+            "success": success,
+            "message": message
+        }
+        
+        if success:
+            hook_path = config_service.git_manager.get_hook_path(HookType.POST_MERGE)
+            if hook_path:
+                result["hook_path"] = str(hook_path)
+            result["next_steps"] = [
+                "The post-merge hook will detect when you merge in a worktree",
+                "It will suggest the sync_dataset command to run",
+                "This helps keep main dataset updated with worktree changes"
+            ]
+            
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
     
     elif name == "sync_dataset":
