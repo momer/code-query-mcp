@@ -106,8 +106,11 @@ class FileAnalyzer:
             )
             
             # If stdin mode failed, try the old way as fallback
-            if result.returncode != 0 and "invalid" in result.stderr.lower():
-                logger.warning("Claude CLI doesn't support stdin mode, using fallback")
+            # TODO: This check is brittle as it depends on the CLI's error string.
+            # A more robust solution would be to check the `claude --version` or
+            # look for a more specific error code if available.
+            if result.returncode != 0 and ("invalid" in result.stderr.lower() or "unrecognized" in result.stderr.lower()):
+                logger.warning("Claude CLI may not support stdin mode ('-p -'), using fallback")
                 # Only for small files to avoid ARG_MAX issues
                 if len(prompt) > 100000:  # ~100KB threshold
                     raise Exception(f"File too large for command-line argument mode ({len(prompt)} chars)")

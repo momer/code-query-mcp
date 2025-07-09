@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, List
 from functools import lru_cache
 from storage.sqlite_storage import CodeQueryServer
 from analysis.analyzer import FileAnalyzer
+from app.job_storage import JobStorage
 
 # Initialize Huey with SQLite backend
 # This creates a separate database for job queue management
@@ -43,6 +44,12 @@ def get_project_config(project_root: str) -> Dict[str, Any]:
     with open(config_path, 'r') as f:
         return json.load(f)
 
+@lru_cache(maxsize=8)
+def get_job_storage(db_path: str) -> JobStorage:
+    """Creates and caches JobStorage instances."""
+    logger.info(f"Creating or reusing job storage connection for db: {db_path}")
+    return JobStorage(db_path)
+
 @huey.task(retries=2, retry_delay=60)
 def process_file_documentation(
     filepath: str, 
@@ -67,59 +74,51 @@ def process_file_documentation(
     """
     logger.info(f"Processing documentation for {filepath} (Job ID: {job_id})...")
     
+    # Get dependencies
+    storage = get_storage_server(project_root)
+    config = get_project_config(project_root)
+    model = config.get('model', 'sonnet')
+    job_storage = get_job_storage(storage.db_path) if job_id else None
+    
+    # Track success and error for finally block
+    success = False
+    error_message = None
+    
     try:
-        # Get dependencies
-        storage = get_storage_server(project_root)
-        config = get_project_config(project_root)
-        model = config.get('model', 'sonnet')
-        
         # Use FileAnalyzer for core logic
         analyzer = FileAnalyzer(project_root, storage, model)
         result = analyzer.analyze_and_document(filepath, dataset_name, commit_hash)
         
-        # Update job progress if job_id provided
-        if job_id:
-            try:
-                from app.job_storage import JobStorage
-                job_storage = JobStorage(storage.db_path)
-                job_storage.record_file_processed(
-                    job_id=job_id,
-                    filepath=filepath,
-                    success=True,
-                    huey_task_id=str(huey.task.id) if hasattr(huey, 'task') else None,
-                    commit_hash=commit_hash
-                )
-            except Exception as e:
-                logger.warning(f"Failed to update job progress: {e}")
-        
+        success = True
         logger.info(f"✓ Completed documentation for {filepath}")
         return {"success": True, "filepath": filepath, "job_id": job_id}
         
     except (PermissionError, FileNotFoundError, ValueError, KeyError) as e:
         # Non-retriable errors - don't trigger Huey retry
-        logger.error(f"✗ Validation failed for {filepath}, will not retry: {str(e)}")
-        
-        # Update job progress for failure
-        if job_id:
-            try:
-                from app.job_storage import JobStorage
-                job_storage = JobStorage(storage.db_path)
-                job_storage.record_file_processed(
-                    job_id=job_id,
-                    filepath=filepath,
-                    success=False,
-                    error_message=str(e),
-                    commit_hash=commit_hash
-                )
-            except Exception as je:
-                logger.warning(f"Failed to update job progress: {je}")
-        
-        return {"success": False, "filepath": filepath, "error": str(e), "job_id": job_id}
+        error_message = str(e)
+        logger.error(f"✗ Validation failed for {filepath}, will not retry: {error_message}")
+        return {"success": False, "filepath": filepath, "error": error_message, "job_id": job_id}
         
     except Exception as e:
         # Retriable errors - re-raise for Huey
-        logger.error(f"✗ Task failed for {filepath} in job {job_id}: {str(e)}")
+        error_message = str(e)
+        logger.error(f"✗ Task failed for {filepath} in job {job_id}: {error_message}")
         raise
+        
+    finally:
+        # Update job progress regardless of success/failure
+        if job_id and job_storage:
+            try:
+                job_storage.record_file_processed(
+                    job_id=job_id,
+                    filepath=filepath,
+                    success=success,
+                    error_message=error_message,
+                    huey_task_id=str(huey.task.id) if hasattr(huey, 'task') else None,
+                    commit_hash=commit_hash
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update job progress for {filepath}: {e}")
 
 @huey.task()
 def process_documentation_batch(

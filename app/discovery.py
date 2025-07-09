@@ -180,46 +180,57 @@ class FileDiscoveryService:
                 return True
         return False
     
-    def get_file_commit_hash(self, filepath: str) -> str:
+    def get_file_content_hash(self, filepath: str) -> str:
         """
-        Get the latest commit hash for a file.
+        Get the git blob hash for the current content of a file.
+        This hashes the actual file content in the working directory,
+        including uncommitted changes.
         
         Args:
             filepath: Relative path to the file
             
         Returns:
-            Commit hash or "uncommitted" if not in git
+            Content hash or "uncommitted" if not in git or file doesn't exist
         """
         try:
             result = subprocess.run(
-                ["git", "log", "-1", "--format=%H", "--", filepath],
+                ["git", "hash-object", filepath],
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
                 timeout=5,
-                check=False  # Don't raise on non-zero exit
+                check=True
             )
             
             if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
+                return result.stdout.strip()[:12]  # Use short hash for consistency
                 
         except (subprocess.SubprocessError, OSError):
             pass
             
         return "uncommitted"
     
+    def get_file_commit_hash(self, filepath: str) -> str:
+        """
+        DEPRECATED: Use get_file_content_hash instead.
+        This method is kept for backward compatibility but now returns content hash.
+        """
+        return self.get_file_content_hash(filepath)
+    
     def get_files_with_commit_hashes(self, 
                                    directory: str = ".",
                                    exclude_patterns: Optional[List[str]] = None) -> List[Dict[str, str]]:
         """
-        Efficiently discover files and their latest commit hashes.
+        Efficiently discover files and their content hashes.
+        Uses git hash-object to hash actual file content in the working directory,
+        including uncommitted changes.
         
         Args:
             directory: Directory to search (relative to project root)
             exclude_patterns: Additional patterns to exclude
             
         Returns:
-            List of dicts with 'filepath' and 'commit_hash' keys
+            List of dicts with 'filepath' and 'commit_hash' (actually content hash) keys
         """
         # First discover files
         files = self.discover_files(directory, exclude_patterns)
@@ -227,57 +238,42 @@ class FileDiscoveryService:
         if not files:
             return []
         
-        # Try to get all commit hashes efficiently
         file_info = []
+        hash_map = {}
         
         try:
-            # Use git ls-tree to get current tree hashes for all files at once
-            # This is more efficient than calling git log for each file
-            result = subprocess.run(
-                ["git", "ls-tree", "-r", "HEAD", "--"] + files,
+            # Use git hash-object --stdin-paths for efficient batch hashing
+            # This correctly hashes the current content, including uncommitted changes
+            proc = subprocess.run(
+                ["git", "hash-object", "--stdin-paths"],
                 cwd=self.project_root,
+                input="\n".join(files),
                 capture_output=True,
                 text=True,
                 timeout=30,
-                check=False
+                check=True
             )
             
-            if result.returncode == 0 and result.stdout:
-                # Parse git ls-tree output
-                # Format: <mode> <type> <hash>\t<file>
-                hash_map = {}
-                for line in result.stdout.strip().split('\n'):
-                    if not line:
-                        continue
-                    parts = line.split('\t')
-                    if len(parts) == 2:
-                        file_path = parts[1]
-                        # Get the hash from the first part
-                        tree_info = parts[0].split()
-                        if len(tree_info) >= 3:
-                            hash_map[file_path] = tree_info[2][:12]  # Use short hash
-                
-                # Build result with hashes
-                for filepath in files:
-                    file_info.append({
-                        'filepath': filepath,
-                        'commit_hash': hash_map.get(filepath, "uncommitted")
-                    })
+            hashes = proc.stdout.strip().split('\n')
+            if len(hashes) == len(files):
+                # Create mapping of filepath to hash (using short hashes)
+                hash_map = {filepath: hash[:12] for filepath, hash in zip(files, hashes)}
             else:
-                # Git failed, use fallback
-                for filepath in files:
-                    file_info.append({
-                        'filepath': filepath,
-                        'commit_hash': self.get_file_commit_hash(filepath)
-                    })
-                    
+                # Fallback if parsing fails
+                logger.warning("Mismatch between file count and hash count from git hash-object")
+                raise subprocess.CalledProcessError(1, "hash-object count mismatch")
+                
         except (subprocess.SubprocessError, OSError) as e:
-            logger.warning(f"Failed to get commit hashes efficiently: {e}")
-            # Fallback to individual queries
+            logger.warning(f"Failed to get content hashes efficiently: {e}. Falling back to individual hashing.")
+            # Fallback to individual hashing if batch mode fails
             for filepath in files:
-                file_info.append({
-                    'filepath': filepath,
-                    'commit_hash': self.get_file_commit_hash(filepath)
-                })
+                hash_map[filepath] = self.get_file_content_hash(filepath)
         
+        # Build result list
+        for filepath in files:
+            file_info.append({
+                'filepath': filepath,
+                'commit_hash': hash_map.get(filepath, "uncommitted")  # Note: 'commit_hash' is really content hash
+            })
+            
         return file_info
