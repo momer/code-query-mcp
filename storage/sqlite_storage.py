@@ -33,7 +33,14 @@ def get_db_connection(db_path: str):
     # For multi-process/threaded servers, you'd need thread-local storage.
     if _db_connection is None:
         try:
+            # Ensure the directory exists before attempting to connect
+            db_dir = os.path.dirname(db_path)
+            if db_dir and not os.path.exists(db_dir):
+                logging.info(f"Creating database directory: {db_dir}")
+                os.makedirs(db_dir, exist_ok=True)
+                
             # The DB_PATH is now dynamically set based on our logic above
+            logging.info(f"Connecting to database at: {db_path}")
             conn = sqlite3.connect(db_path, check_same_thread=False)  # check_same_thread for web servers
             
             # Enable WAL mode for better concurrency. This is the key change.

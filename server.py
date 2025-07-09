@@ -49,7 +49,7 @@ os.makedirs(DB_DIR, exist_ok=True)
 
 # Initialize server
 server = Server("code-query")
-query_server = CodeQueryServer(DB_PATH, DB_DIR)
+query_server = CodeQueryServer(storage_backend=None, db_path=DB_PATH, db_dir=DB_DIR)
 config_service = ConfigurationService(DB_DIR)
 
 

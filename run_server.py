@@ -13,8 +13,11 @@ sys.path.insert(0, script_dir)
 os.environ['MCP_CLIENT_ROOT'] = original_cwd
 
 # Import and run the server
-from server import main
-import asyncio
+from server import main_sync
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        main_sync()
+    except Exception as e:
+        print(f"Server error: {e}", file=sys.stderr)
+        sys.exit(1)
