@@ -17,6 +17,34 @@ class QueryStrategy(ABC):
     def get_additional_variants(self, query: str) -> List[str]:
         """Get additional query variants. Base implementation returns none."""
         return []
+    
+    def normalize(self, query: str) -> str:
+        """
+        Normalize query for consistent grouping (e.g., in analytics).
+        
+        Default implementation converts to lowercase, removes extra whitespace,
+        and sorts terms unless query contains operators.
+        
+        Args:
+            query: Raw query string
+            
+        Returns:
+            Normalized query string
+        """
+        # Convert to lowercase and strip
+        normalized = query.lower().strip()
+        
+        # Remove extra whitespace
+        normalized = re.sub(r'\s+', ' ', normalized)
+        
+        # Sort terms for consistency unless it has operators
+        # Check for operators as whole words
+        has_operators = any(f' {op} ' in f' {normalized} ' for op in ['and', 'or', 'not', 'near'])
+        if not has_operators:
+            terms = normalized.split()
+            normalized = ' '.join(sorted(terms))
+        
+        return normalized
 
 class DefaultQueryStrategy(QueryStrategy):
     """Basic FTS5 query building with minimal processing."""

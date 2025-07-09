@@ -1,24 +1,36 @@
 """Main search analytics service."""
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from datetime import datetime, timedelta
-from .analytics_models import *
+from .analytics_models import (
+    QueryStatus, SlowQuery, FailedQuery, SearchTerm, SearchInsights
+)
 from .analytics_storage import AnalyticsStorage
 from .metrics_collector import MetricsCollector
 import hashlib
 import re
 
+if TYPE_CHECKING:
+    from search.query_builder import FTS5QueryBuilder
+
 
 class SearchAnalytics:
     """Main search analytics service."""
     
-    def __init__(self, storage_backend):
-        # Use existing storage backend connection info
-        db_path = getattr(storage_backend, 'db_path', ':memory:')
+    def __init__(self, db_path: str, query_builder: Optional['FTS5QueryBuilder'] = None) -> None:
+        """
+        Initialize search analytics service.
         
-        self.analytics_storage = AnalyticsStorage(db_path)
-        self.metrics_collector = MetricsCollector(self.analytics_storage)
+        Args:
+            db_path: Path to the analytics database (can be same as main DB)
+            query_builder: Optional query builder for normalization
+        """
+        self.analytics_storage: AnalyticsStorage = AnalyticsStorage(db_path)
+        self.metrics_collector: MetricsCollector = MetricsCollector(self.analytics_storage)
         self.metrics_collector.start()
+        
+        # Store query builder for normalization
+        self.query_builder: Optional['FTS5QueryBuilder'] = query_builder
     
     def log_query(self, 
                   query: str, 
@@ -29,7 +41,7 @@ class SearchAnalytics:
                   fts_query: Optional[str] = None,
                   error: Optional[Exception] = None,
                   fallback_used: bool = False,
-                  client_info: Optional[Dict[str, Any]] = None):
+                  client_info: Optional[Dict[str, Any]] = None) -> None:
         """Log a search query execution."""
         # Determine status
         if error:
@@ -47,7 +59,11 @@ class SearchAnalytics:
         
         # Normalize query if not provided
         if normalized_query is None:
-            normalized_query = self._normalize_query(query)
+            if self.query_builder:
+                normalized_query = self.query_builder.normalize_query(query)
+            else:
+                # Fallback to simple normalization if no query builder
+                normalized_query = query.lower().strip()
         
         # Use FTS query or fallback to normalized
         if fts_query is None:
@@ -130,22 +146,6 @@ class SearchAnalytics:
             time_period=time_period
         )
     
-    def _normalize_query(self, query: str) -> str:
-        """Normalize query for grouping."""
-        # Convert to lowercase
-        normalized = query.lower().strip()
-        
-        # Remove extra whitespace
-        normalized = re.sub(r'\s+', ' ', normalized)
-        
-        # Sort terms for consistency (unless it has operators)
-        # Check for operators as whole words
-        has_operators = any(f' {op} ' in f' {normalized} ' for op in ['and', 'or', 'not', 'near'])
-        if not has_operators:
-            terms = normalized.split()
-            normalized = ' '.join(sorted(terms))
-        
-        return normalized
     
     def _generate_optimization_suggestions(self, slow_query: SlowQuery) -> List[str]:
         """Generate optimization suggestions for slow queries."""
@@ -197,14 +197,14 @@ class SearchAnalytics:
         
         return alternatives
     
-    def update_metrics(self):
+    def update_metrics(self) -> None:
         """Update aggregated metrics (call periodically)."""
         self.analytics_storage.update_hourly_metrics()
     
-    def cleanup_old_data(self, retention_days: int = 90):
+    def cleanup_old_data(self, retention_days: int = 90) -> None:
         """Clean up old analytics data."""
         self.analytics_storage.cleanup_old_data(retention_days)
     
-    def shutdown(self):
+    def shutdown(self) -> None:
         """Shutdown analytics service."""
         self.metrics_collector.stop()

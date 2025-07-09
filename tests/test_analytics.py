@@ -272,9 +272,7 @@ class TestSearchAnalytics(unittest.TestCase):
         """Set up analytics service."""
         import tempfile
         self.test_db_fd, self.test_db_path = tempfile.mkstemp(suffix='.db')
-        self.mock_storage = Mock()
-        self.mock_storage.db_path = self.test_db_path
-        self.analytics = SearchAnalytics(self.mock_storage)
+        self.analytics = SearchAnalytics(self.test_db_path)
     
     def tearDown(self):
         """Clean up analytics service."""
@@ -338,12 +336,16 @@ class TestSearchAnalytics(unittest.TestCase):
     
     def test_query_normalization(self):
         """Test query normalization for grouping."""
+        # Create a mock query builder with normalization
+        from search.query_builder import FTS5QueryBuilder
+        query_builder = FTS5QueryBuilder()
+        
         # Test basic normalization
-        normalized = self.analytics._normalize_query("  Test  Query  ")
+        normalized = query_builder.normalize_query("  Test  Query  ")
         self.assertEqual(normalized, "query test")  # lowercased, trimmed, sorted
         
         # Test with operators (should not sort)
-        normalized = self.analytics._normalize_query("term1 AND term2")
+        normalized = query_builder.normalize_query("term1 AND term2")
         self.assertEqual(normalized, "term1 and term2")
     
     def test_optimization_suggestions(self):
@@ -441,6 +443,90 @@ class TestSearchAnalytics(unittest.TestCase):
         failed_query.query_text = "get_user_auth"
         alternatives = self.analytics._suggest_alternatives(failed_query)
         self.assertIn("get user auth", alternatives)
+
+
+    def test_aggregation_fallback(self):
+        """Test that get_insights_data falls back to raw logs when no aggregated data."""
+        # Don't run hourly aggregation, so we only have raw logs
+        base_time = datetime.now()
+        
+        # Insert some test queries
+        for i in range(10):
+            entry = QueryLogEntry(
+                query_id=f"fallback-{i}",
+                query_text=f"test query {i}",
+                normalized_query=f"query test {i}",
+                fts_query=f"test query {i}",
+                dataset="fallback_test",
+                status=QueryStatus.SUCCESS if i < 8 else QueryStatus.NO_RESULTS,
+                result_count=i * 10,
+                duration_ms=float(i * 5),
+                timestamp=base_time,
+                fallback_attempted=(i % 3 == 0)
+            )
+            self.analytics.analytics_storage.insert_query_log(entry)
+        
+        # Get insights without aggregated data
+        insights_data = self.analytics.analytics_storage.get_insights_data(
+            since=base_time - timedelta(hours=1),
+            dataset="fallback_test"
+        )
+        
+        # Verify we got data from raw logs
+        overview = insights_data["overview"]
+        self.assertEqual(overview["total_queries"], 10)
+        self.assertEqual(overview["unique_queries"], 10)
+        self.assertEqual(overview["success_rate"], 80.0)  # 8/10 success
+        self.assertEqual(overview["no_results_rate"], 20.0)  # 2/10 no results
+        self.assertEqual(overview["fallback_rate"], 40.0)  # 4/10 fallback (0,3,6,9)
+        
+        # Verify top queries
+        top_queries = insights_data["top_queries"]
+        self.assertEqual(len(top_queries), 10)
+    
+    def test_aggregation_with_metrics(self):
+        """Test that get_insights_data uses aggregated metrics when available."""
+        # Insert data in the past (2 hours ago) so it gets aggregated
+        base_time = datetime.now()
+        
+        # Use direct SQL to insert data exactly 90 minutes ago
+        import sqlite3
+        with sqlite3.connect(self.test_db_path) as conn:
+            for i in range(20):
+                conn.execute("""
+                    INSERT INTO search_query_log (
+                        query_id, query_text, normalized_query, fts_query,
+                        dataset, status, result_count, duration_ms,
+                        timestamp, error_message, fallback_attempted
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-90 minutes'), NULL, ?)
+                """, (
+                    f"agg-{i}",
+                    f"query {i % 5}",  # Only 5 unique queries
+                    f"query {i % 5}",
+                    f"query {i % 5}",
+                    "agg_test",
+                    "success",
+                    i,
+                    float(i * 2),
+                    (i % 4 == 0)  # 25% fallback
+                ))
+            conn.commit()
+        
+        # Run aggregation
+        self.analytics.analytics_storage.update_hourly_metrics()
+        
+        # Get insights - should use aggregated data
+        insights_data = self.analytics.analytics_storage.get_insights_data(
+            since=base_time - timedelta(hours=2),
+            dataset="agg_test"
+        )
+        
+        # Verify aggregated data
+        overview = insights_data["overview"]
+        self.assertEqual(overview["total_queries"], 20)
+        self.assertEqual(overview["unique_queries"], 5)  # Only 5 unique normalized queries
+        self.assertEqual(overview["success_rate"], 100.0)
+        self.assertEqual(overview["fallback_rate"], 25.0)  # 5/20 = 25%
 
 
 if __name__ == "__main__":

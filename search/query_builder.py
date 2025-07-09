@@ -88,20 +88,5 @@ class FTS5QueryBuilder:
         Returns:
             Normalized query string
         """
-        # Delegate to primary strategy if it has normalize method
-        if hasattr(self.primary_strategy, 'normalize'):
-            return self.primary_strategy.normalize(user_query)
-        
-        # Default normalization
-        normalized = user_query.lower().strip()
-        # Remove extra whitespace
-        import re
-        normalized = re.sub(r'\s+', ' ', normalized)
-        
-        # Sort terms unless query has operators
-        has_operators = any(f' {op} ' in f' {normalized} ' for op in ['and', 'or', 'not', 'near'])
-        if not has_operators:
-            terms = normalized.split()
-            normalized = ' '.join(sorted(terms))
-        
-        return normalized
+        # Delegate to primary strategy's normalize method
+        return self.primary_strategy.normalize(user_query)
