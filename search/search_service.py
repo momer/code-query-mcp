@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass
 from enum import Enum
 import logging
+import time
 
 from .models import FileMetadata, SearchResult
 from .query_builder import FTS5QueryBuilder
@@ -73,7 +74,8 @@ class SearchServiceInterface(ABC):
         self,
         query: str,
         dataset_id: str,
-        config: Optional[SearchConfig] = None
+        config: Optional[SearchConfig] = None,
+        client_info: Optional[Dict[str, Any]] = None
     ) -> List[FileMetadata]:
         """
         Search only in file metadata.
@@ -93,7 +95,8 @@ class SearchServiceInterface(ABC):
         self,
         query: str,
         dataset_id: str,
-        config: Optional[SearchConfig] = None
+        config: Optional[SearchConfig] = None,
+        client_info: Optional[Dict[str, Any]] = None
     ) -> List[SearchResult]:
         """
         Search only in file content.
@@ -119,7 +122,8 @@ class SearchService(SearchServiceInterface):
         query_sanitizer: Optional[FTS5QuerySanitizer] = None,
         query_analyzer: Optional[QueryComplexityAnalyzer] = None,
         default_config: Optional[SearchConfig] = None,
-        progressive_strategy: Optional[ProgressiveSearchStrategy] = None
+        progressive_strategy: Optional[ProgressiveSearchStrategy] = None,
+        analytics: Optional[Any] = None  # Optional analytics service
     ):
         """
         Initialize search service.
@@ -131,6 +135,7 @@ class SearchService(SearchServiceInterface):
             query_analyzer: Optional query complexity analyzer instance
             default_config: Optional default configuration
             progressive_strategy: Optional progressive search strategy
+            analytics: Optional analytics service instance
         """
         self.storage = storage_backend
         self.query_builder = query_builder or FTS5QueryBuilder()
@@ -138,6 +143,7 @@ class SearchService(SearchServiceInterface):
         self.query_analyzer = query_analyzer or QueryComplexityAnalyzer()
         self.default_config = default_config or SearchConfig()
         self.progressive_strategy = progressive_strategy or create_default_progressive_strategy()
+        self.analytics = analytics
     
     def search(
         self,
@@ -164,148 +170,209 @@ class SearchService(SearchServiceInterface):
         self,
         query: str,
         dataset_id: str,
-        config: Optional[SearchConfig] = None
+        config: Optional[SearchConfig] = None,
+        client_info: Optional[Dict[str, Any]] = None
     ) -> List[FileMetadata]:
         """Search only in file metadata."""
         config = config or self.default_config
+        start_time = time.time()
+        error = None
+        results = []
+        fallback_used = False
+        normalized_query = None
+        fts_query = None
         
-        # Analyze query complexity if enabled
-        if config.enable_complexity_analysis:
-            # Pass config values directly to the analyze method
-            metrics = self.query_analyzer.analyze(
-                query,
-                max_terms=config.max_query_terms,
-                max_cost=config.max_query_cost
-            )
-            
-            if metrics.complexity_level == ComplexityLevel.TOO_COMPLEX:
-                logger.warning(
-                    f"Query too complex: {', '.join(metrics.warnings)}"
+        try:
+            # Analyze query complexity if enabled
+            if config.enable_complexity_analysis:
+                # Pass config values directly to the analyze method
+                metrics = self.query_analyzer.analyze(
+                    query,
+                    max_terms=config.max_query_terms,
+                    max_cost=config.max_query_cost
                 )
-                # Optionally return empty results or raise exception
-                return []
-            elif metrics.warnings:
-                logger.info(f"Query complexity warnings: {', '.join(metrics.warnings)}")
-        
-        # Sanitize query if enabled
-        if config.enable_query_sanitization:
-            try:
-                # Pass config to sanitize method instead of setting on instance
-                query = self.query_sanitizer.sanitize(query, config=config.sanitization_config)
-                logger.debug(f"Sanitized query: {query}")
-            except ValueError as e:
-                logger.warning(f"Query sanitization failed: {e}")
-                # Return empty results for invalid queries
-                return []
-        
-        # Use progressive search if enabled
-        if config.enable_progressive_search and config.enable_fallback:
-            # Define search function for progressive strategy
-            def search_func(transformed_query: str) -> List[FileMetadata]:
-                return self.storage.search_files(
-                    query=transformed_query,
-                    dataset_id=dataset_id,
-                    limit=config.max_results,
-                    timeout_ms=config.query_timeout_ms
-                )
+                
+                if metrics.complexity_level == ComplexityLevel.TOO_COMPLEX:
+                    logger.warning(
+                        f"Query too complex: {', '.join(metrics.warnings)}"
+                    )
+                    # Optionally return empty results or raise exception
+                    return []
+                elif metrics.warnings:
+                    logger.info(f"Query complexity warnings: {', '.join(metrics.warnings)}")
             
-            # Define deduplication function if needed
-            dedupe_func = (lambda r: r.file_path) if config.deduplicate_results else None
-            
-            # Execute progressive search
-            results = self.progressive_strategy.execute_search(
-                query=query,
-                search_func=search_func,
-                min_results=1,  # Try next strategy if no results
-                max_results=config.max_results,
-                deduplicate_func=dedupe_func
-            )
-            
-            return results
-        else:
-            # Original implementation for non-progressive search
-            # Build query variants if fallback enabled
-            if config.enable_fallback:
-                query_variants = self.query_builder.get_query_variants(query)
-            else:
-                # Build single query (code-aware is default in build_query)
-                query_variants = [self.query_builder.build_query(query)]
-            
-            results = []
-            seen_paths = set()
-            
-            for variant in query_variants:
+            # Sanitize query if enabled
+            if config.enable_query_sanitization:
                 try:
-                    # Execute metadata search
-                    variant_results = self.storage.search_files(
-                        query=variant,
+                    # Pass config to sanitize method instead of setting on instance
+                    query = self.query_sanitizer.sanitize(query, config=config.sanitization_config)
+                    logger.debug(f"Sanitized query: {query}")
+                except ValueError as e:
+                    logger.warning(f"Query sanitization failed: {e}")
+                    # Return empty results for invalid queries
+                    return []
+            
+            # Track normalized query for analytics
+            normalized_query = self.query_builder.normalize_query(query) if hasattr(self.query_builder, 'normalize_query') else query
+            
+            # Use progressive search if enabled
+            if config.enable_progressive_search and config.enable_fallback:
+                # Define search function for progressive strategy
+                def search_func(transformed_query: str) -> List[FileMetadata]:
+                    nonlocal fts_query, fallback_used
+                    if fts_query is None:
+                        fts_query = transformed_query
+                    else:
+                        fallback_used = True
+                    return self.storage.search_files(
+                        query=transformed_query,
                         dataset_id=dataset_id,
                         limit=config.max_results,
                         timeout_ms=config.query_timeout_ms
                     )
-                    
-                    # Deduplicate if enabled
-                    if config.deduplicate_results:
-                        for result in variant_results:
-                            if result.file_path not in seen_paths:
-                                seen_paths.add(result.file_path)
-                                results.append(result)
-                    else:
-                        results.extend(variant_results)
-                    
-                    # Stop if we have enough results
-                    if len(results) >= config.max_results:
-                        break
-                        
-                except Exception as e:
-                    logger.error(f"Search failed for query variant '{variant}': {e}", exc_info=True)
-                    # Continue with next variant on error
-                    continue
             
-            return results[:config.max_results]
+                # Define deduplication function if needed
+                dedupe_func = (lambda r: r.file_path) if config.deduplicate_results else None
+                
+                # Execute progressive search
+                results = self.progressive_strategy.execute_search(
+                    query=query,
+                    search_func=search_func,
+                    min_results=1,  # Try next strategy if no results
+                    max_results=config.max_results,
+                    deduplicate_func=dedupe_func
+                )
+                
+            else:
+                # Original implementation for non-progressive search
+                # Build query variants if fallback enabled
+                if config.enable_fallback:
+                    query_variants = self.query_builder.get_query_variants(query)
+                else:
+                    # Build single query (code-aware is default in build_query)
+                    query_variants = [self.query_builder.build_query(query)]
+                
+                results = []
+                seen_paths = set()
+                
+                for i, variant in enumerate(query_variants):
+                    try:
+                        # Track first query as FTS query
+                        if i == 0:
+                            fts_query = variant
+                        else:
+                            fallback_used = True
+                        
+                        # Execute metadata search
+                        variant_results = self.storage.search_files(
+                            query=variant,
+                            dataset_id=dataset_id,
+                            limit=config.max_results,
+                            timeout_ms=config.query_timeout_ms
+                        )
+                        
+                        # Deduplicate if enabled
+                        if config.deduplicate_results:
+                            for result in variant_results:
+                                if result.file_path not in seen_paths:
+                                    seen_paths.add(result.file_path)
+                                    results.append(result)
+                        else:
+                            results.extend(variant_results)
+                        
+                        # Stop if we have enough results
+                        if len(results) >= config.max_results:
+                            break
+                            
+                    except Exception as e:
+                        logger.error(f"Search failed for query variant '{variant}': {e}", exc_info=True)
+                        # Continue with next variant on error
+                        continue
+                
+                results = results[:config.max_results]
+            
+        except Exception as e:
+            error = e
+            logger.error(f"Search metadata failed: {e}", exc_info=True)
+            raise
+        
+        finally:
+            # Log analytics
+            duration_ms = (time.time() - start_time) * 1000
+            
+            if self.analytics:
+                self.analytics.log_query(
+                    query=query,
+                    dataset=dataset_id,
+                    results_count=len(results),
+                    duration_ms=duration_ms,
+                    normalized_query=normalized_query,
+                    fts_query=fts_query,
+                    error=error,
+                    fallback_used=fallback_used,
+                    client_info=client_info
+                )
+        
+        return results
     
     def search_content(
         self,
         query: str,
         dataset_id: str,
-        config: Optional[SearchConfig] = None
+        config: Optional[SearchConfig] = None,
+        client_info: Optional[Dict[str, Any]] = None
     ) -> List[SearchResult]:
         """Search only in file content."""
         config = config or self.default_config
+        start_time = time.time()
+        error = None
+        results = []
+        fallback_used = False
+        normalized_query = None
+        fts_query = None
         
-        # Analyze query complexity if enabled
-        if config.enable_complexity_analysis:
-            # Pass config values directly to the analyze method
-            metrics = self.query_analyzer.analyze(
-                query,
-                max_terms=config.max_query_terms,
-                max_cost=config.max_query_cost
-            )
-            
-            if metrics.complexity_level == ComplexityLevel.TOO_COMPLEX:
-                logger.warning(
-                    f"Query too complex: {', '.join(metrics.warnings)}"
+        try:
+            # Analyze query complexity if enabled
+            if config.enable_complexity_analysis:
+                # Pass config values directly to the analyze method
+                metrics = self.query_analyzer.analyze(
+                    query,
+                    max_terms=config.max_query_terms,
+                    max_cost=config.max_query_cost
                 )
-                # Optionally return empty results or raise exception
-                return []
-            elif metrics.warnings:
-                logger.info(f"Query complexity warnings: {', '.join(metrics.warnings)}")
+            
+                if metrics.complexity_level == ComplexityLevel.TOO_COMPLEX:
+                    logger.warning(
+                        f"Query too complex: {', '.join(metrics.warnings)}"
+                    )
+                    # Optionally return empty results or raise exception
+                    return []
+                elif metrics.warnings:
+                    logger.info(f"Query complexity warnings: {', '.join(metrics.warnings)}")
         
-        # Sanitize query if enabled
-        if config.enable_query_sanitization:
-            try:
-                # Pass config to sanitize method instead of setting on instance
-                query = self.query_sanitizer.sanitize(query, config=config.sanitization_config)
-                logger.debug(f"Sanitized query: {query}")
-            except ValueError as e:
-                logger.warning(f"Query sanitization failed: {e}")
-                # Return empty results for invalid queries
-                return []
+            # Sanitize query if enabled
+            if config.enable_query_sanitization:
+                try:
+                    # Pass config to sanitize method instead of setting on instance
+                    query = self.query_sanitizer.sanitize(query, config=config.sanitization_config)
+                    logger.debug(f"Sanitized query: {query}")
+                except ValueError as e:
+                    logger.warning(f"Query sanitization failed: {e}")
+                    # Return empty results for invalid queries
+                    return []
+            
+            # Track normalized query for analytics
+            normalized_query = self.query_builder.normalize_query(query) if hasattr(self.query_builder, 'normalize_query') else query
         
-        # Use progressive search if enabled
-        if config.enable_progressive_search and config.enable_fallback:
-            # Define search function for progressive strategy
-            def search_func(transformed_query: str) -> List[SearchResult]:
+            # Use progressive search if enabled
+            if config.enable_progressive_search and config.enable_fallback:
+                # Define search function for progressive strategy
+                def search_func(transformed_query: str) -> List[SearchResult]:
+                    nonlocal fts_query, fallback_used
+                    if fts_query is None:
+                        fts_query = transformed_query
+                    else:
+                        fallback_used = True
                 results = self.storage.search_full_content(
                     query=transformed_query,
                     dataset_id=dataset_id,
@@ -321,73 +388,104 @@ class SearchService(SearchServiceInterface):
                         if r.relevance_score >= config.min_relevance_score
                     ]
                 
-                return results
-            
-            # Define deduplication function if needed
-            dedupe_func = (
-                lambda r: (r.file_path, r.match_content)
-            ) if config.deduplicate_results else None
-            
-            # Execute progressive search
-            results = self.progressive_strategy.execute_search(
-                query=query,
-                search_func=search_func,
-                min_results=1,  # Try next strategy if no results
-                max_results=config.max_results,
-                deduplicate_func=dedupe_func
-            )
-            
-            return results
-        else:
-            # Original implementation for non-progressive search
-            # Build query variants if fallback enabled
-            if config.enable_fallback:
-                query_variants = self.query_builder.get_query_variants(query)
+                    return results
+                
+                # Define deduplication function if needed
+                dedupe_func = (
+                    lambda r: (r.file_path, r.match_content)
+                ) if config.deduplicate_results else None
+                
+                # Execute progressive search
+                results = self.progressive_strategy.execute_search(
+                    query=query,
+                    search_func=search_func,
+                    min_results=1,  # Try next strategy if no results
+                    max_results=config.max_results,
+                    deduplicate_func=dedupe_func
+                )
+                
             else:
-                # Build single query (code-aware is default in build_query)
-                query_variants = [self.query_builder.build_query(query)]
-            
-            results = []
-            seen_content = set()
-            
-            for variant in query_variants:
-                try:
-                    # Execute content search
-                    variant_results = self.storage.search_full_content(
-                        query=variant,
-                        dataset_id=dataset_id,
-                        limit=config.max_results,
-                        include_snippets=config.enable_snippet_generation,
-                        timeout_ms=config.query_timeout_ms
-                    )
-                    
-                    # Apply relevance filter if enabled
-                    if config.enable_relevance_scoring and config.min_relevance_score > 0:
-                        variant_results = [
-                            r for r in variant_results 
-                            if r.relevance_score >= config.min_relevance_score
-                        ]
-                    
-                    # Deduplicate if enabled
-                    if config.deduplicate_results:
-                        for result in variant_results:
-                            content_key = (result.file_path, result.match_content)
-                            if content_key not in seen_content:
-                                seen_content.add(content_key)
-                                results.append(result)
-                    else:
-                        results.extend(variant_results)
-                    
-                    # Stop if we have enough results
-                    if len(results) >= config.max_results:
-                        break
+                # Original implementation for non-progressive search
+                # Build query variants if fallback enabled
+                if config.enable_fallback:
+                    query_variants = self.query_builder.get_query_variants(query)
+                else:
+                    # Build single query (code-aware is default in build_query)
+                    query_variants = [self.query_builder.build_query(query)]
+                
+                results = []
+                seen_content = set()
+                
+                for i, variant in enumerate(query_variants):
+                    try:
+                        # Track first query as FTS query
+                        if i == 0:
+                            fts_query = variant
+                        else:
+                            fallback_used = True
                         
-                except Exception as e:
-                    logger.error(f"Search failed for query variant '{variant}': {e}", exc_info=True)
-                    # Continue with next variant on error
-                    continue
+                        # Execute content search
+                        variant_results = self.storage.search_full_content(
+                            query=variant,
+                            dataset_id=dataset_id,
+                            limit=config.max_results,
+                            include_snippets=config.enable_snippet_generation,
+                            timeout_ms=config.query_timeout_ms
+                        )
+                        
+                        # Apply relevance filter if enabled
+                        if config.enable_relevance_scoring and config.min_relevance_score > 0:
+                            variant_results = [
+                                r for r in variant_results 
+                                if r.relevance_score >= config.min_relevance_score
+                            ]
+                        
+                        # Deduplicate if enabled
+                        if config.deduplicate_results:
+                            for result in variant_results:
+                                content_key = (result.file_path, result.match_content)
+                                if content_key not in seen_content:
+                                    seen_content.add(content_key)
+                                    results.append(result)
+                        else:
+                            results.extend(variant_results)
+                        
+                        # Stop if we have enough results
+                        if len(results) >= config.max_results:
+                            break
+                            
+                    except Exception as e:
+                        logger.error(f"Search failed for query variant '{variant}': {e}", exc_info=True)
+                        # Continue with next variant on error
+                        continue
             
-            return results[:config.max_results]
+            
+            # Limit results to max_results
+            results = results[:config.max_results]
+            
+        except Exception as e:
+            error = e
+            logger.error(f"Search content failed: {e}", exc_info=True)
+            raise
+        
+        finally:
+            # Log analytics
+            duration_ms = (time.time() - start_time) * 1000
+            
+            if self.analytics:
+                self.analytics.log_query(
+                    query=query,
+                    dataset=dataset_id,
+                    results_count=len(results),
+                    duration_ms=duration_ms,
+                    normalized_query=normalized_query,
+                    fts_query=fts_query,
+                    error=error,
+                    fallback_used=fallback_used,
+                    client_info=client_info
+                )
+        
+        return results
     
     def _unified_search(
         self,
