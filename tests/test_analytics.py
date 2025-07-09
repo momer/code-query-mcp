@@ -371,6 +371,50 @@ class TestSearchAnalytics(unittest.TestCase):
         suggestions = self.analytics._generate_optimization_suggestions(slow_query)
         self.assertIn("Query returns many results; add more specific terms to narrow down", suggestions)
     
+    def test_percentile_calculations(self):
+        """Test that hourly metrics calculate percentiles correctly."""
+        # Insert test data directly using SQLite datetime for consistency
+        with sqlite3.connect(self.test_db_path) as conn:
+            # Insert 100 queries with known distribution
+            for i in range(1, 101):
+                conn.execute("""
+                    INSERT INTO search_query_log (
+                        query_id, query_text, normalized_query, fts_query,
+                        dataset, status, result_count, duration_ms,
+                        timestamp, error_message, fallback_attempted
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-90 minutes'), NULL, 0)
+                """, (
+                    f"perc-{i}",
+                    f"query {i}",
+                    f"query {i}", 
+                    f"query {i}",
+                    "test",
+                    "success",
+                    10,
+                    float(i)  # 1ms to 100ms for easy percentile verification
+                ))
+            conn.commit()
+        
+        # Update hourly metrics
+        self.analytics.analytics_storage.update_hourly_metrics()
+        
+        # Verify percentiles
+        with sqlite3.connect(self.test_db_path) as conn:
+            cursor = conn.execute("""
+                SELECT p50_duration_ms, p95_duration_ms, p99_duration_ms
+                FROM search_metrics_hourly
+                WHERE dataset = 'test'
+            """)
+            row = cursor.fetchone()
+            
+            self.assertIsNotNone(row, "Should have hourly metrics")
+            p50, p95, p99 = row
+            
+            # Verify percentiles are in expected ranges
+            self.assertAlmostEqual(p50, 50.0, delta=5.0)
+            self.assertAlmostEqual(p95, 95.0, delta=5.0)
+            self.assertAlmostEqual(p99, 99.0, delta=5.0)
+    
     def test_alternative_suggestions(self):
         """Test generation of alternative query suggestions."""
         failed_query = FailedQuery(

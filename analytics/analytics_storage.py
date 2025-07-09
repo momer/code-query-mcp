@@ -268,8 +268,53 @@ class AnalyticsStorage:
     def update_hourly_metrics(self):
         """Update aggregated hourly metrics (called by scheduled job)."""
         with sqlite3.connect(self.db_path) as conn:
-            # Calculate metrics for the last complete hour
+            # Calculate metrics for the last complete hour using proper percentiles
             conn.execute("""
+                WITH PercentileData AS (
+                    -- Calculate percentile ranks for each query
+                    SELECT 
+                        dataset,
+                        strftime('%Y-%m-%d %H:00:00', timestamp) as hour_str,
+                        duration_ms,
+                        normalized_query,
+                        status,
+                        fallback_attempted,
+                        NTILE(100) OVER (
+                            PARTITION BY dataset, strftime('%Y-%m-%d %H:00:00', timestamp) 
+                            ORDER BY duration_ms
+                        ) as percentile_rank
+                    FROM search_query_log
+                    WHERE timestamp >= datetime('now', '-2 hours')
+                        AND timestamp < datetime('now', '-1 hour')
+                ),
+                PercentileValues AS (
+                    -- Extract specific percentile values
+                    SELECT 
+                        dataset,
+                        hour_str,
+                        MAX(CASE WHEN percentile_rank <= 50 THEN duration_ms END) as p50,
+                        MAX(CASE WHEN percentile_rank <= 95 THEN duration_ms END) as p95,
+                        MAX(CASE WHEN percentile_rank <= 99 THEN duration_ms END) as p99
+                    FROM PercentileData
+                    GROUP BY dataset, hour_str
+                ),
+                AggregatedMetrics AS (
+                    -- Calculate all other metrics
+                    SELECT 
+                        dataset,
+                        strftime('%Y-%m-%d %H:00:00', timestamp) as hour_str,
+                        COUNT(*) as total_queries,
+                        COUNT(DISTINCT normalized_query) as unique_queries,
+                        AVG(duration_ms) as avg_duration_ms,
+                        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
+                        SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count,
+                        SUM(CASE WHEN status = 'no_results' THEN 1 ELSE 0 END) as no_results_count,
+                        SUM(CASE WHEN fallback_attempted = 1 THEN 1 ELSE 0 END) as fallback_count
+                    FROM search_query_log
+                    WHERE timestamp >= datetime('now', '-2 hours')
+                        AND timestamp < datetime('now', '-1 hour')
+                    GROUP BY dataset, strftime('%Y-%m-%d %H:00:00', timestamp)
+                )
                 INSERT OR REPLACE INTO search_metrics_hourly (
                     metric_id,
                     hour_bucket,
@@ -286,24 +331,22 @@ class AnalyticsStorage:
                     fallback_count
                 )
                 SELECT 
-                    dataset || '_' || strftime('%Y%m%d%H', timestamp) as metric_id,
-                    datetime(strftime('%Y-%m-%d %H:00:00', timestamp)) as hour_bucket,
-                    dataset,
-                    COUNT(*) as total_queries,
-                    COUNT(DISTINCT normalized_query) as unique_queries,
-                    AVG(duration_ms) as avg_duration_ms,
-                    -- Percentile calculations (simplified - in production use window functions)
-                    AVG(duration_ms) as p50_duration_ms,
-                    MAX(duration_ms) * 0.95 as p95_duration_ms,
-                    MAX(duration_ms) * 0.99 as p99_duration_ms,
-                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
-                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count,
-                    SUM(CASE WHEN status = 'no_results' THEN 1 ELSE 0 END) as no_results_count,
-                    SUM(CASE WHEN fallback_attempted = 1 THEN 1 ELSE 0 END) as fallback_count
-                FROM search_query_log
-                WHERE timestamp >= datetime('now', '-2 hours')
-                    AND timestamp < datetime('now', '-1 hour')
-                GROUP BY dataset, strftime('%Y-%m-%d %H:00:00', timestamp)
+                    am.dataset || '_' || strftime('%Y%m%d%H', am.hour_str) as metric_id,
+                    datetime(am.hour_str) as hour_bucket,
+                    am.dataset,
+                    am.total_queries,
+                    am.unique_queries,
+                    am.avg_duration_ms,
+                    COALESCE(pv.p50, am.avg_duration_ms) as p50_duration_ms,
+                    COALESCE(pv.p95, am.avg_duration_ms) as p95_duration_ms,
+                    COALESCE(pv.p99, am.avg_duration_ms) as p99_duration_ms,
+                    am.success_count,
+                    am.error_count,
+                    am.no_results_count,
+                    am.fallback_count
+                FROM AggregatedMetrics am
+                LEFT JOIN PercentileValues pv 
+                    ON am.dataset = pv.dataset AND am.hour_str = pv.hour_str
             """)
     
     def cleanup_old_data(self, retention_days: int = 90):
@@ -322,3 +365,81 @@ class AnalyticsStorage:
                 DELETE FROM search_metrics_hourly
                 WHERE hour_bucket < ?
             """, (cutoff_date,))
+    
+    def get_insights_data(self, since: datetime, dataset: Optional[str] = None) -> Dict[str, Any]:
+        """Get insights data from aggregated metrics and raw logs.
+        
+        Args:
+            since: Start time for the insights window
+            dataset: Optional dataset filter
+            
+        Returns:
+            Dictionary with overview metrics and top queries
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            # Build query with optional dataset filter
+            dataset_filter = "AND dataset = ?" if dataset else ""
+            params = [since, dataset] if dataset else [since]
+            
+            # First try to get data from aggregated hourly metrics
+            cursor = conn.execute(f"""
+                SELECT 
+                    SUM(total_queries) as total_queries,
+                    SUM(unique_queries) as unique_queries,
+                    SUM(avg_duration_ms * total_queries) / NULLIF(SUM(total_queries), 0) as avg_response_time,
+                    SUM(success_count) * 100.0 / NULLIF(SUM(total_queries), 0) as success_rate,
+                    SUM(fallback_count) * 100.0 / NULLIF(SUM(total_queries), 0) as fallback_rate,
+                    SUM(no_results_count) * 100.0 / NULLIF(SUM(total_queries), 0) as no_results_rate
+                FROM search_metrics_hourly
+                WHERE hour_bucket > ? {dataset_filter}
+            """, params)
+            
+            aggregated_row = cursor.fetchone()
+            
+            # If no aggregated data or very recent time window, fall back to raw logs
+            if not aggregated_row or aggregated_row["total_queries"] is None:
+                # Get overview metrics from raw logs
+                cursor = conn.execute(f"""
+                    SELECT 
+                        COUNT(*) as total_queries,
+                        COUNT(DISTINCT normalized_query) as unique_queries,
+                        AVG(duration_ms) as avg_response_time,
+                        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate,
+                        SUM(CASE WHEN fallback_attempted = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as fallback_rate,
+                        SUM(CASE WHEN status = 'no_results' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as no_results_rate
+                    FROM search_query_log
+                    WHERE timestamp > ? {dataset_filter}
+                """, params)
+                
+                overview_row = cursor.fetchone()
+            else:
+                overview_row = aggregated_row
+            
+            # Get top queries (always from raw logs for accuracy)
+            cursor = conn.execute(f"""
+                SELECT 
+                    normalized_query,
+                    COUNT(*) as count,
+                    AVG(duration_ms) as avg_duration
+                FROM search_query_log
+                WHERE timestamp > ? {dataset_filter}
+                GROUP BY normalized_query
+                ORDER BY count DESC
+                LIMIT 10
+            """, params)
+            
+            top_queries = [
+                {
+                    "query": row["normalized_query"],
+                    "count": row["count"],
+                    "avg_duration_ms": row["avg_duration"]
+                }
+                for row in cursor
+            ]
+            
+            return {
+                "overview": dict(overview_row) if overview_row else {},
+                "top_queries": top_queries
+            }

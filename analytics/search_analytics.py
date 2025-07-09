@@ -7,7 +7,6 @@ from .analytics_storage import AnalyticsStorage
 from .metrics_collector import MetricsCollector
 import hashlib
 import re
-import sqlite3
 
 
 class SearchAnalytics:
@@ -103,74 +102,33 @@ class SearchAnalytics:
                            dataset: Optional[str] = None,
                            time_period: str = "day") -> SearchInsights:
         """Get aggregated search insights."""
-        # This would query the aggregated metrics tables
-        # Implementation depends on specific requirements
-        with sqlite3.connect(self.analytics_storage.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            
-            # Time range based on period
-            if time_period == "hour":
-                since = datetime.now() - timedelta(hours=1)
-            elif time_period == "day":
-                since = datetime.now() - timedelta(days=1)
-            elif time_period == "week":
-                since = datetime.now() - timedelta(weeks=1)
-            else:
-                since = datetime.now() - timedelta(days=30)
-            
-            # Build query with optional dataset filter
-            dataset_filter = "AND dataset = ?" if dataset else ""
-            params = [since, dataset] if dataset else [since]
-            
-            # Get overview metrics
-            cursor = conn.execute(f"""
-                SELECT 
-                    COUNT(*) as total_queries,
-                    COUNT(DISTINCT normalized_query) as unique_queries,
-                    AVG(duration_ms) as avg_response_time,
-                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate,
-                    SUM(CASE WHEN fallback_attempted = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as fallback_rate,
-                    SUM(CASE WHEN status = 'no_results' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as no_results_rate
-                FROM search_query_log
-                WHERE timestamp > ? {dataset_filter}
-            """, params)
-            
-            row = cursor.fetchone()
-            
-            # Get top queries
-            cursor = conn.execute(f"""
-                SELECT 
-                    normalized_query,
-                    COUNT(*) as count,
-                    AVG(duration_ms) as avg_duration
-                FROM search_query_log
-                WHERE timestamp > ? {dataset_filter}
-                GROUP BY normalized_query
-                ORDER BY count DESC
-                LIMIT 10
-            """, params)
-            
-            top_queries = [
-                {
-                    "query": row["normalized_query"],
-                    "count": row["count"],
-                    "avg_duration_ms": row["avg_duration"]
-                }
-                for row in cursor
-            ]
-            
-            return SearchInsights(
-                total_queries=row["total_queries"] if row else 0,
-                unique_queries=row["unique_queries"] if row else 0,
-                avg_response_time_ms=row["avg_response_time"] if row else 0,
-                success_rate=row["success_rate"] if row else 0,
-                fallback_rate=row["fallback_rate"] if row else 0,
-                no_results_rate=row["no_results_rate"] if row else 0,
-                top_queries=top_queries,
-                top_datasets=[],  # Would implement similarly
-                query_volume_trend=[],  # Would implement time series
-                time_period=time_period
-            )
+        # Time range based on period
+        if time_period == "hour":
+            since = datetime.now() - timedelta(hours=1)
+        elif time_period == "day":
+            since = datetime.now() - timedelta(days=1)
+        elif time_period == "week":
+            since = datetime.now() - timedelta(weeks=1)
+        else:
+            since = datetime.now() - timedelta(days=30)
+        
+        # Get insights data from storage
+        insights_data = self.analytics_storage.get_insights_data(since, dataset)
+        overview = insights_data.get("overview", {})
+        top_queries = insights_data.get("top_queries", [])
+        
+        return SearchInsights(
+            total_queries=overview.get("total_queries", 0),
+            unique_queries=overview.get("unique_queries", 0),
+            avg_response_time_ms=overview.get("avg_response_time", 0),
+            success_rate=overview.get("success_rate", 0),
+            fallback_rate=overview.get("fallback_rate", 0),
+            no_results_rate=overview.get("no_results_rate", 0),
+            top_queries=top_queries,
+            top_datasets=[],  # TODO: Implement dataset aggregation
+            query_volume_trend=[],  # TODO: Implement time series
+            time_period=time_period
+        )
     
     def _normalize_query(self, query: str) -> str:
         """Normalize query for grouping."""
