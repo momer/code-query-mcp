@@ -9,7 +9,7 @@ Single-threaded, managed by Claude automatically:
 
 1. **Install the MCP server:**
    ```bash
-   claude mcp add -s user code-query -- python /path/to/code-query-mcp/server.py
+   claude mcp add -s user code-query -- python /path/to/code-query-mcp/run_server.py
    ```
 
 2. **Restart Claude**
@@ -73,7 +73,7 @@ Start searching:
 
    **Stdio Transport (Recommended):**
    ```bash
-   claude mcp add -s user code-query "python ~/mcp-servers/code-query-mcp/server.py"
+   claude mcp add -s user code-query "python ~/mcp-servers/code-query-mcp/run_server.py"
    ```
 
    **HTTP Transport (for concurrent requests):**
