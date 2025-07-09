@@ -6,6 +6,7 @@ import logging
 from typing import Dict, Any, Optional, List
 from functools import lru_cache
 from storage.sqlite_storage import CodeQueryServer
+from analysis.analyzer import FileAnalyzer
 
 # Initialize Huey with SQLite backend
 # This creates a separate database for job queue management
@@ -47,108 +48,95 @@ def process_file_documentation(
     filepath: str, 
     dataset_name: str, 
     commit_hash: str,
-    project_root: str
+    project_root: str,
+    job_id: Optional[str] = None  # Added for job tracking
 ) -> Dict[str, Any]:
     """
-    Background task that calls claude and updates documentation.
+    Huey task wrapper for file documentation.
+    Delegates all business logic to FileAnalyzer.
     
     Args:
         filepath: Relative path to the file to document
         dataset_name: Dataset to update
         commit_hash: Git commit hash for tracking
         project_root: Root directory of the project
+        job_id: Optional job ID for progress tracking
         
     Returns:
         Dict with success status and any error messages
     """
-    logger.info(f"Processing documentation for {filepath}...")
+    logger.info(f"Processing documentation for {filepath} (Job ID: {job_id})...")
     
-    # --- Non-retriable validation phase ---
     try:
-        # Security validation: Ensure file is within project boundaries
-        abs_filepath = os.path.join(project_root, filepath)
-        real_filepath = os.path.realpath(abs_filepath)
-        real_project_root = os.path.realpath(project_root)
-        
-        # Security check: Ensure resolved path is within project root
-        # Using os.path.commonpath for more idiomatic and robust check
-        if os.path.commonpath([real_filepath, real_project_root]) != real_project_root:
-            error_msg = f"Security violation: File {filepath} resolves outside project root"
-            logger.error(error_msg)
-            return {"success": False, "filepath": filepath, "error": error_msg}
-        
-        # Verify file exists and is a file
-        if not os.path.isfile(real_filepath):
-            error_msg = f"File not found or not a regular file: {filepath}"
-            logger.error(error_msg)
-            return {"success": False, "filepath": filepath, "error": error_msg}
-        
-        # Load configuration from cache
+        # Get dependencies
+        storage = get_storage_server(project_root)
         config = get_project_config(project_root)
-        model = config.get('model', 'claude-3-5-sonnet-20240620')
+        model = config.get('model', 'sonnet')
         
-    except (FileNotFoundError, ValueError, KeyError) as e:
-        logger.error(f"✗ Validation/setup failed for {filepath}, will not retry: {str(e)}")
-        return {"success": False, "filepath": filepath, "error": f"Validation failed: {e}"}
-    
-    # --- Retriable execution phase ---
-    # Any exception raised here will be caught by Huey for retry
-    
-    # Mitigate TOCTOU by reading the file now and passing content via stdin
-    try:
-        with open(real_filepath, 'r', encoding='utf-8') as f:
-            file_content = f.read()
+        # Use FileAnalyzer for core logic
+        analyzer = FileAnalyzer(project_root, storage, model)
+        result = analyzer.analyze_and_document(filepath, dataset_name, commit_hash)
+        
+        # Update job progress if job_id provided
+        if job_id:
+            try:
+                from app.job_storage import JobStorage
+                job_storage = JobStorage(storage.db_path)
+                job_storage.record_file_processed(
+                    job_id=job_id,
+                    filepath=filepath,
+                    success=True,
+                    huey_task_id=str(huey.task.id) if hasattr(huey, 'task') else None,
+                    commit_hash=commit_hash
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update job progress: {e}")
+        
+        logger.info(f"✓ Completed documentation for {filepath}")
+        return {"success": True, "filepath": filepath, "job_id": job_id}
+        
+    except (PermissionError, FileNotFoundError, ValueError, KeyError) as e:
+        # Non-retriable errors - don't trigger Huey retry
+        logger.error(f"✗ Validation failed for {filepath}, will not retry: {str(e)}")
+        
+        # Update job progress for failure
+        if job_id:
+            try:
+                from app.job_storage import JobStorage
+                job_storage = JobStorage(storage.db_path)
+                job_storage.record_file_processed(
+                    job_id=job_id,
+                    filepath=filepath,
+                    success=False,
+                    error_message=str(e),
+                    commit_hash=commit_hash
+                )
+            except Exception as je:
+                logger.warning(f"Failed to update job progress: {je}")
+        
+        return {"success": False, "filepath": filepath, "error": str(e), "job_id": job_id}
+        
     except Exception as e:
-        # This could be a read error if the file is removed after the check.
-        # Treat as a retriable error.
-        logger.error(f"Failed to read file {filepath}: {e}")
-        raise  # Re-raise to trigger Huey retry
-    
-    # Pass file content via stdin to avoid TOCTOU vulnerability
-    result = subprocess.run([
-        'claude', 
-        '-p',  # Print mode for non-interactive
-        f'Analyze and document the code in the provided file ({filepath}). Focus on its purpose, main functions, exports, imports, and key implementation details.\n\nFile content:\n{file_content}',
-        '--model', model
-    ], capture_output=True, text=True, cwd=project_root, check=False)  # Use check=False to handle error manually
-    
-    if result.returncode != 0:
-        # Log a sanitized message by default
-        error_summary = (result.stderr or "No stderr output").splitlines()[0] if result.stderr else "Unknown error"
-        error_msg = f"Claude processing failed with exit code {result.returncode}"
-        logger.error(f"✗ Failed to document {filepath}: {error_msg}")
-        # Log detailed output at debug level
-        logger.debug(f"Full stderr for {filepath}: {result.stderr}")
-        raise Exception(f"{error_msg}. See debug logs for details.")  # This will now trigger a retry
-    
-    # Parse Claude's response and update database
-    documentation = parse_claude_response(result.stdout)
-    
-    # Update the main code-query database with relative path using cached connection
-    storage = get_storage_server(project_root)
-    storage.update_file_documentation(
-        dataset_name=dataset_name,
-        filepath=filepath,  # Use original relative path for storage
-        commit_hash=commit_hash,
-        **documentation
-    )
-    
-    logger.info(f"✓ Completed documentation for {filepath}")
-    return {"success": True, "filepath": filepath}
+        # Retriable errors - re-raise for Huey
+        logger.error(f"✗ Task failed for {filepath} in job {job_id}: {str(e)}")
+        raise
 
 @huey.task()
 def process_documentation_batch(
     files: List[Dict[str, str]], 
     dataset_name: str,
-    project_root: str
+    project_root: str,
+    job_id: Optional[str] = None  # Added for job tracking
 ) -> Dict[str, Any]:
     """
     Enqueues multiple file processing tasks for parallel execution.
+    Now supports job tracking.
     
     Args:
         files: List of dicts with 'filepath' and 'commit_hash' keys
         dataset_name: Dataset to update
         project_root: Root directory of the project
+        job_id: Optional job ID for progress tracking
         
     Returns:
         Dict with task IDs for tracking
@@ -160,36 +148,21 @@ def process_documentation_batch(
             filepath=file_info['filepath'],
             dataset_name=dataset_name,
             commit_hash=file_info['commit_hash'],
-            project_root=project_root
+            project_root=project_root,
+            job_id=job_id  # Pass through job_id
         )
         task_ids.append(str(task.id))
     
-    logger.info(f"Enqueued a batch of {len(files)} files for parallel processing.")
+    logger.info(f"Enqueued {len(files)} files for job {job_id}")
     
     return {
+        "job_id": job_id,
         "batch_size": len(files),
         "task_ids": task_ids,
         "status": "enqueued"
     }
 
-def parse_claude_response(response: str) -> Dict[str, Any]:
-    """
-    Parse Claude's response into structured documentation.
-    This is a placeholder - actual implementation would parse
-    Claude's structured output.
-    """
-    # TODO: Implement actual parsing based on Claude's response format
-    # For now, return a minimal valid structure
-    return {
-        "overview": response[:200] + "..." if len(response) > 200 else response,
-        "functions": {},
-        "imports": {},
-        "exports": {},
-        "types_interfaces_classes": {},
-        "constants": {},
-        "dependencies": [],
-        "other_notes": []
-    }
+# Note: parse_claude_response has been moved to analysis.parser module
 
 # Health check task for monitoring
 @huey.task()

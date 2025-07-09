@@ -1,32 +1,20 @@
 """Application layer for documentation workflows.
 
 This module provides high-level orchestration for documentation workflows,
-including file discovery, analysis, and batch processing.
+building on top of the Huey task queue for execution.
 """
 
+from .job_models import DocumentationJob, JobStatus, ProcessedFile, JobProgress
+from .job_storage import JobStorage
+from .discovery import FileDiscoveryService
 from .documentation_service import DocumentationService
-from .file_discovery import FileDiscoveryService
-from .file_analyzer import FileAnalyzer, FileAnalyzerRegistry
-from .documentation_models import (
-    DocumentationRequest,
-    DocumentationResult,
-    DocumentationStatus,
-    FileType,
-    FileAnalysisResult,
-    ProgressUpdate
-)
-from .progress_tracker import ProgressTracker
 
 __all__ = [
-    'DocumentationService',
+    'DocumentationJob',
+    'JobStatus',
+    'ProcessedFile',
+    'JobProgress',
+    'JobStorage',
     'FileDiscoveryService',
-    'FileAnalyzer',
-    'FileAnalyzerRegistry',
-    'DocumentationRequest',
-    'DocumentationResult',
-    'DocumentationStatus',
-    'FileType',
-    'FileAnalysisResult',
-    'ProgressUpdate',
-    'ProgressTracker'
+    'DocumentationService'
 ]

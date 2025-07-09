@@ -926,64 +926,21 @@ class CodeQueryServer:
         if exclude_patterns is None:
             exclude_patterns = []
         
-        # Default exclusions
-        default_excludes = [
-            'node_modules/*', 'dist/*', 'build/*', '.git/*', '*.pyc', '__pycache__/*',
-            'venv/*', '.env', '*.log', '*.tmp', '.DS_Store', 'coverage/*', '.pytest_cache/*'
-        ]
-        exclude_patterns.extend(default_excludes)
+        # Use the new FileDiscoveryService
+        from app.discovery import FileDiscoveryService
+        discovery = FileDiscoveryService(self.cwd)
         
-        # Find all code files - prefer git-tracked files when available
-        code_extensions = ['.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.cpp', '.c', '.h', 
-                          '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala', '.r', '.jl']
+        # Discover files (returns relative paths)
+        relative_files = discovery.discover_files(directory, exclude_patterns)
         
-        all_files = []
-        
-        # Try to use git ls-files if we're in a git repository
-        try:
-            result = subprocess.run(
-                ["git", "ls-files", "--", directory],
-                cwd=self.cwd,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            
-            # Filter git-tracked files by extension and exclusion patterns
-            git_files = result.stdout.strip().split('\n') if result.stdout.strip() else []
-            for file_path in git_files:
-                if not file_path:  # Skip empty lines
-                    continue
-                    
-                # Check if it's a code file
-                _, ext = os.path.splitext(file_path.lower())
-                if ext in code_extensions:
-                    # Apply exclusion patterns
-                    if not any(fnmatch.fnmatch(file_path, pattern) for pattern in exclude_patterns):
-                        full_path = os.path.join(self.cwd, file_path)
-                        if os.path.exists(full_path):  # Ensure file still exists
-                            all_files.append(full_path)
-                            
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            # Fallback to glob if git is not available or fails
-            for ext in code_extensions:
-                pattern = os.path.join(directory, f"**/*{ext}")
-                files = glob.glob(pattern, recursive=True)
-                
-                # Filter out excluded patterns
-                filtered_files = []
-                for file in files:
-                    rel_path = os.path.relpath(file, directory)
-                    if not any(fnmatch.fnmatch(rel_path, pattern) for pattern in exclude_patterns):
-                        filtered_files.append(file)
-                
-                all_files.extend(filtered_files)
-        
-        if not all_files:
+        if not relative_files:
             return {
                 "success": False,
                 "message": f"No code files found in {directory}"
             }
+        
+        # Convert to absolute paths for backward compatibility
+        all_files = [os.path.join(self.cwd, f) for f in relative_files]
         
         # Create batches
         batches = [all_files[i:i+batch_size] for i in range(0, len(all_files), batch_size)]
