@@ -332,9 +332,9 @@ class SchemaMigrator:
             logging.info("Swapping old FTS table with the new one.")
             
             # Disable FTS triggers temporarily
-            self.db.execute("DROP TRIGGER IF EXISTS files_fts_insert")
-            self.db.execute("DROP TRIGGER IF EXISTS files_fts_delete")
-            self.db.execute("DROP TRIGGER IF EXISTS files_fts_update")
+            self.db.execute("DROP TRIGGER IF EXISTS files_ai")
+            self.db.execute("DROP TRIGGER IF EXISTS files_ad")
+            self.db.execute("DROP TRIGGER IF EXISTS files_au")
             
             # Drop old FTS table
             self.db.execute("DROP TABLE files_fts")
@@ -342,7 +342,50 @@ class SchemaMigrator:
             # Rename new table
             self.db.execute(f"ALTER TABLE {temp_table_name} RENAME TO files_fts")
             
-            # Recreate triggers - these will be recreated by the parent setup_database method
+            # Recreate triggers to keep FTS table in sync with the files table
+            logging.info("Recreating FTS triggers...")
+            self.db.execute("""
+                CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
+                    INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, ddd_context,
+                        functions, exports, imports, types_interfaces_classes, constants, 
+                        dependencies, other_notes, full_content)
+                    VALUES (new.rowid, new.dataset_id, new.filepath, new.filename, new.overview, 
+                        new.ddd_context, new.functions, new.exports, new.imports, 
+                        new.types_interfaces_classes, new.constants, new.dependencies, 
+                        new.other_notes, new.full_content);
+                END
+            """)
+            
+            self.db.execute("""
+                CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN
+                    INSERT INTO files_fts(files_fts, rowid, dataset_id, filepath, filename, 
+                        overview, ddd_context, functions, exports, imports, 
+                        types_interfaces_classes, constants, dependencies, other_notes, full_content)
+                    VALUES ('delete', old.rowid, old.dataset_id, old.filepath, old.filename, 
+                        old.overview, old.ddd_context, old.functions, old.exports, 
+                        old.imports, old.types_interfaces_classes, old.constants, 
+                        old.dependencies, old.other_notes, old.full_content);
+                END
+            """)
+            
+            self.db.execute("""
+                CREATE TRIGGER files_au AFTER UPDATE ON files BEGIN
+                    INSERT INTO files_fts(files_fts, rowid, dataset_id, filepath, filename, 
+                        overview, ddd_context, functions, exports, imports, 
+                        types_interfaces_classes, constants, dependencies, other_notes, full_content)
+                    VALUES ('delete', old.rowid, old.dataset_id, old.filepath, old.filename, 
+                        old.overview, old.ddd_context, old.functions, old.exports, 
+                        old.imports, old.types_interfaces_classes, old.constants, 
+                        old.dependencies, old.other_notes, old.full_content);
+                    INSERT INTO files_fts(rowid, dataset_id, filepath, filename, overview, 
+                        ddd_context, functions, exports, imports, types_interfaces_classes, 
+                        constants, dependencies, other_notes, full_content)
+                    VALUES (new.rowid, new.dataset_id, new.filepath, new.filename, new.overview, 
+                        new.ddd_context, new.functions, new.exports, new.imports, 
+                        new.types_interfaces_classes, new.constants, new.dependencies, 
+                        new.other_notes, new.full_content);
+                END
+            """)
 
             # Step 4: Finalize the migration
             self.db.execute("INSERT OR REPLACE INTO schema_version (version) VALUES ('3')")
@@ -350,7 +393,8 @@ class SchemaMigrator:
             logging.info("Schema migration to version 3 complete.")
 
         except Exception as e:
-            logging.error(f"Migration to v3 failed: {e}.")
+            # Use exc_info=True to log the full traceback
+            logging.error(f"Migration to v3 failed: {e}.", exc_info=True)
             # Attempt to clean up the temporary table
             try:
                 self.db.execute(f"DROP TABLE IF EXISTS {temp_table_name}")
